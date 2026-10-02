@@ -86,6 +86,7 @@ reset_web_port_changes() {
 }
 
 target="$1"
+extra_usermods_target=""
 buildtype="$2"
 
 # USB host support is opt-in and ESP32-S3-only (needs USB OTG):
@@ -211,6 +212,7 @@ echo "Symlinking secp256k1-embedded-ecdh for unix and macOS builds..."
 ln -sf ../../secp256k1-embedded-ecdh "$codebasedir"/lvgl_micropython/ext_mod/secp256k1-embedded-ecdh
 echo "Symlinking c_mpos for unix and macOS builds..."
 ln -sf ../../c_mpos "$codebasedir"/lvgl_micropython/ext_mod/c_mpos
+ln -sf ../../c_meshcrypto "$codebasedir"/lvgl_micropython/ext_mod/c_meshcrypto
 
 echo "Applying lvgl_micropython esp32 uart repl enable/disable at runtime patch..."
 apply_patch "$codebasedir"/lvgl_micropython/lib/micropython "$codebasedir"/lvgl_micropython/esp32_uart_repl_runtime.patch
@@ -395,6 +397,8 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
             # Restart the transfer every VSYNC so a desync heals within one frame.
             # (CONFIG_LCD_RGB_ISR_IRAM_SAFE hangs display init: lcd_bus's callbacks are not in IRAM.)
             extra_configs="$extra_configs CONFIG_LCD_RGB_RESTART_IN_VSYNC=y"
+            # MeshCore identity crypto (Ed25519 sign/verify, X25519 key exchange) for the MeshCore app
+            extra_usermods_target="USER_C_MODULE=$codebasedir/c_meshcrypto/micropython.cmake"
         fi
         if [ "$usbhost" == "1" ]; then
             # USB host (needs the adapter behind a USB hub to
@@ -487,6 +491,7 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
 		USER_C_MODULE="$codebasedir"/secp256k1-embedded-ecdh/micropython.cmake \
 		USER_C_MODULE="$codebasedir"/c_mpos/micropython.cmake \
 		$usb_usermod \
+		$extra_usermods_target \
 		CONFIG_ADC_MIC_TASK_CORE=1 \
 		$extra_configs \
 		"$frozenmanifest"
