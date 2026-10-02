@@ -201,6 +201,13 @@ def detect_board():
         is_esp32s3 = "S3" in sys.implementation._machine.upper()
 
         if is_esp32s3:
+            if __debug__: logger.debug("sensecap_indicator ?")
+            if i2c0 := fail_save_i2c(sda=39, scl=40):
+                from mpos.board import sensecap_indicator_probe
+                if sensecap_indicator_probe.present(i2c0):
+                    return "sensecap_indicator"
+                restore_i2c(sda=39, scl=40)
+
             if __debug__: logger.debug("lilygo_t_hmi ?")
             if detect_lilygo_t_hmi():
                 return "lilygo_t_hmi"
