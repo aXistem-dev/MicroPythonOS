@@ -199,13 +199,41 @@ async def _expander_irq_safety_net():
 
 
 TaskManager.create_supervised_task(_expander_irq_safety_net, restart_on_return=True)
+# 6) LoRa radio (D1L/D1Pro): SX1262 on SPI host 1, control lines on the expander, polled
+#    (DIO1 sits behind the expander, so the driver reads IRQ status over SPI).
 _tcxo_high = sum(_tcxo() for _ in range(5))
-radio_pins = {
-    "nss": radio_nss, "rst": radio_rst, "busy": radio_busy, "dio1": radio_dio1,
-    "sck": SPI_SCK, "mosi": SPI_MOSI, "miso": SPI_MISO, "spi_host": 1,
-    "tcxo_mv": 2400 if _tcxo_high >= 3 else None,
-    "dio2_rf_sw": True,
-}
+radio_tcxo_mv = 2400 if _tcxo_high >= 3 else None
+
+
+def _radio_reset_pulse():
+    radio_rst(0)
+    time.sleep_ms(2)
+    radio_rst(1)
+    time.sleep_ms(10)
+
+
+radio_spi_bus = None
+radio_spi = None
+try:
+    from lora import SX1262
+    from mpos import LoRaManager
+    from mpos.lora_spi_adapter import SPIAdapter, wrap_sx126x_cmd
+    from mpos.polled_sx126x import PolledSX126x
+
+    radio_spi_bus = machine.SPI.Bus(host=1, mosi=SPI_MOSI, miso=SPI_MISO, sck=SPI_SCK)
+    radio_spi = machine.SPI.Device(spi_bus=radio_spi_bus, freq=8_000_000, cs=-1, polarity=0,
+                                   phase=0, firstbit=machine.SPI.Device.MSB, bits=8)
+    _radio = SX1262(spi=SPIAdapter(radio_spi), cs=radio_nss, busy=radio_busy, dio1=None,
+                    dio2_rf_sw=True, dio3_tcxo_millivolts=radio_tcxo_mv,
+                    dio3_tcxo_start_time_us=1000, reset=radio_rst)
+    wrap_sx126x_cmd(_radio)
+    LoRaManager.radioChip = PolledSX126x(_radio)
+    LoRaManager.board_reset = _radio_reset_pulse
+    LoRaManager._tcxo_mv = radio_tcxo_mv
+    LoRaManager._tcxo_start_us = 1000
+except Exception as e:  # D1/D1S have no SX1262: BUSY never drops, construction fails
+    logger.warning("sensecap_indicator: no LoRa radio (%s)", e)
+lcd_cs(1)  # the panel must never see radio SPI traffic
 
 # 6) SOC temperature for the top bar (no IMU on this board)
 try:
