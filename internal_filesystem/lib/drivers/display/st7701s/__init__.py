@@ -8,6 +8,9 @@ from . import _st7701s_init
 # the import to resolve.
 sys.modules['_st7701s_init'] = _st7701s_init
 
+from . import _st7701_type17
+sys.modules['_st7701_type17'] = _st7701_type17
+
 # Re-export the public driver class.
 __all__ = [
     'ST7701S',

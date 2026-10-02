@@ -29,7 +29,9 @@ class ST7701S(rgb_display_framework.RGBDisplayDriver):
         color_space=lv.COLOR_FORMAT.RGB565,
         rgb565_byte_swap=False,
         bus_shared_pins=False,
+        init_module='_st7701s_init',
     ):
+        self._init_module = init_module
         super().__init__(
             data_bus=data_bus,
             display_width=display_width,
@@ -57,5 +59,5 @@ class ST7701S(rgb_display_framework.RGBDisplayDriver):
     def _spi_3wire_init(self, type=None):
         # The framework already ran spi_3wire.init(). Send the panel sequence
         # via self.set_params, which routes to spi_3wire.tx_param.
-        mod = __import__('_st7701s_init')
+        mod = __import__(self._init_module)
         mod.init(self)
