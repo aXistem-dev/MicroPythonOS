@@ -229,6 +229,7 @@ try:
     wrap_sx126x_cmd(_radio)
     LoRaManager.radioChip = PolledSX126x(_radio)
     LoRaManager.board_reset = _radio_reset_pulse
+    LoRaManager._dio2_rf_sw = True
     LoRaManager._tcxo_mv = radio_tcxo_mv
     LoRaManager._tcxo_start_us = 1000
 except Exception as e:  # D1/D1S have no SX1262: BUSY never drops, construction fails
