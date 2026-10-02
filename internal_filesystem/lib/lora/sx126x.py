@@ -229,15 +229,18 @@ class _SX126x(BaseModem):
         # interrupted by. This is important because otherwise an unrelated IRQ
         # can trigger the ISR and may not be reset by the driver, leaving DIO1
         # high.
+        # Program the IRQ mask even without a DIO1 pin: the SX126x only latches IRQ flags that
+        # are enabled in IrqMask, so a polled radio (dio1=None) would otherwise never see
+        # RX_DONE although the chip received the packet.
+        self._cmd(
+            ">BHHHH",
+            _CMD_CFG_DIO_IRQ,
+            (_IRQ_RX_DONE | _IRQ_TX_DONE | _IRQ_TIMEOUT | _IRQ_CRC_ERR),  # IRQ mask
+            (_IRQ_RX_DONE | _IRQ_TX_DONE | _IRQ_TIMEOUT) if dio1 else 0,  # DIO1 mask
+            0x0,  # DIO2Mask, not used
+            0x0,  # DIO3Mask, not used
+        )
         if dio1:
-            self._cmd(
-                ">BHHHH",
-                _CMD_CFG_DIO_IRQ,
-                (_IRQ_RX_DONE | _IRQ_TX_DONE | _IRQ_TIMEOUT | _IRQ_CRC_ERR),  # IRQ mask
-                (_IRQ_RX_DONE | _IRQ_TX_DONE | _IRQ_TIMEOUT),  # DIO1 mask
-                0x0,  # DIO2Mask, not used
-                0x0,  # DIO3Mask, not used
-            )
             dio1.irq(self._radio_isr, Pin.IRQ_RISING)
 
         self._clear_irq()
