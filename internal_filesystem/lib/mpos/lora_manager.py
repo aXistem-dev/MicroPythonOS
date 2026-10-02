@@ -214,7 +214,7 @@ class LoRaManager:
 
         # Only continuous RX (0x50) is healthy — the chip should always be
         # listening. Transient modes (FS 0x40, TX 0x60, STANDBY 0x20/0x30)
-        # are brief during tx/rx transitions; a stuck non-RX mode means the
+        # are short during tx/rx transitions; a stuck non-RX mode means the
         # chip fell out of receive and needs recovery.
         if mode == 0x50:
             if LoRaManager._bad_count:
