@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 class LoRaManager:
     radioChip = None
     board_reset = None  # board hook: zero-arg callable pulsing the radio's reset line
+    _lora_spi_device = None  # set by boards that rebuild the radio on their own SPI device
+    _dio2_rf_sw = False  # board sets True when DIO2 drives the RF switch (re-armed after a reset)
     _holder = None
     _watchdog_active = False
     _last_status = None
@@ -117,6 +119,8 @@ class LoRaManager:
                         except Exception as e:
                             logger.warning("reset_chip: TCXO error check FAILED: %s", e)
                     r._cmd("BB", 0x8A, 1)  # SET_PACKET_TYPE → LoRa
+                    if LoRaManager._dio2_rf_sw:
+                        r._cmd("BB", 0x9D, 1)  # SET_DIO2_AS_RF_SWITCH_CTRL: a reset clears it
                     r._cmd(">BHHHH", 0x08,
                         579,    # IrqMask: TX(1)|RX(2)|CRC_ERR(64)|TIMEOUT(512)
                         515,    # DIO1Mask: TX(1)|RX(2)|TIMEOUT(512)
@@ -263,7 +267,8 @@ class LoRaManager:
                 logger.debug("Watchdog: hardware reset (status 0x00, bad=%d)", bad)
 
             chip.disable_irq()
-            if LoRaManager._lora_spi_device is not None and LoRaManager.reset_chip():
+            can_reset = LoRaManager._lora_spi_device is not None or LoRaManager.board_reset is not None
+            if can_reset and LoRaManager.reset_chip():
                 # ponytail: reset_chip() already reset state flags
                 # (_sleep=True, _configured=False, _rx=False) and did
                 # TCXO init + SET_PACKET_TYPE + DIO_IRQ + _clear_irq
