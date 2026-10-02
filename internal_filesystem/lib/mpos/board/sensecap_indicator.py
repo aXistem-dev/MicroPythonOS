@@ -32,7 +32,7 @@ from drivers.display.st7701s import ST7701S
 from drivers.display.st7701s.hybrid_spi3wire import HybridSpi3Wire
 from drivers.io_expander.expander_irq import ExpanderIRQ
 from drivers.io_expander.tca9555 import TCA9555, ExpanderPin
-from mpos import InputManager, SensorManager, TaskManager
+from mpos import InputManager, SensorManager, TaskManager, USBManager
 
 I2C_SDA = const(39)
 I2C_SCL = const(40)
@@ -57,6 +57,9 @@ X_LCD_CS, X_LCD_RST, X_TP_INT, X_TP_RST = 4, 5, 6, 7
 X_RP2040_RST, X_TCXO = 8, 11
 
 RP2040_UART = (2, 19, 20)
+
+# GPIO0 is the red MSB of the RGB bus here: the USB BOOT-button check must not reconfigure it
+USBManager.bootsel_pin = None
 
 # 1) I2C + expander (state survives an ESP32 reset: set every line explicitly)
 i2c_bus = i2c.I2C.Bus(host=0, scl=I2C_SCL, sda=I2C_SDA, freq=400_000, use_locks=False)
