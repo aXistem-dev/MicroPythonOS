@@ -15,9 +15,10 @@ import mpos.ui
 import mpos.ui.focus_direction
 from mpos import InputManager
 
-# Same as Waveshare ESP32-S3-Touch-LCD-2 and Fri3d Camp 2026 Badge
-TFT_HOR_RES=320
-TFT_VER_RES=240
+# Same as Waveshare ESP32-S3-Touch-LCD-2 and Fri3d Camp 2026 Badge, unless MPOS_DISPLAY
+# (e.g. "480x480") asks for another size.
+from mpos.board.display_env import from_environment
+TFT_HOR_RES, TFT_VER_RES = from_environment()
 
 # Fri3d Camp 2024 Badge:
 #TFT_HOR_RES=296
