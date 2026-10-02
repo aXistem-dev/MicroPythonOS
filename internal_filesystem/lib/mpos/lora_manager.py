@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 class LoRaManager:
     radioChip = None
+    board_reset = None  # board hook: zero-arg callable pulsing the radio's reset line
     _holder = None
     _watchdog_active = False
     _last_status = None
@@ -54,16 +55,30 @@ class LoRaManager:
         return LoRaManager._holder
 
     @staticmethod
+    def _pulse_reset():
+        # Hardware-reset the LoRa chip: through the board's hook when it set one, otherwise by
+        # toggling the Fri3d CH32 expander config (0x03 = aux + LCD + LoRa OFF, 0x13 = ON).
+        if LoRaManager.board_reset is not None:
+            LoRaManager.board_reset()
+            return True
+        import mpos
+        import time
+        exp = getattr(mpos, "io_expander", None)
+        if exp is None:
+            return False
+        exp.config = 0x03
+        time.sleep_ms(200)
+        exp.config = 0x13
+        time.sleep_ms(200)
+        if not exp.config[0]:
+            if __debug__:
+                logger.debug("CH32 LoRa reset: readback check failed")
+            return False
+        return True
+
+    @staticmethod
     def reset_chip():
-        # Toggle CH32 expander config to hardware-reset the LoRa chip.
-        # 0x03 = aux + LCD + LoRa OFF (assert reset)
-        # 0x13 = aux + LCD + LoRa ON  (release reset)
-        # expander config setter handles readback + retry + LVGL safe.
         try:
-            import mpos
-            exp = getattr(mpos, "io_expander", None)
-            if exp is None:
-                return False
             import time
             chip = LoRaManager.radioChip
             if chip and __debug__:
@@ -72,22 +87,14 @@ class LoRaManager:
                     logger.debug("reset_chip: pre-reset status=0x%02x", st_pre)
                 except Exception:
                     logger.debug("reset_chip: pre-reset status read failed (chip non-responsive)")
-            exp.config = 0x03
-            time.sleep_ms(200)
-            exp.config = 0x13
-            time.sleep_ms(200)
-            if not exp.config[0]:
-                if __debug__:
-                    logger.debug("CH32 LoRa reset: readback check failed")
+            if not LoRaManager._pulse_reset():
                 return False
             chip = LoRaManager.radioChip
             if not chip:
                 if __debug__:
-                    logger.debug("LoRa chip reset via CH32 expander")
+                    logger.debug("LoRa chip reset")
                 return True
             r = chip.radio
-            if __debug__:
-                logger.debug("reset_chip: expander confirms lora_reset=%s", exp.config[0])
             for retry in range(3):
                 try:
                     r._sleep = True
@@ -128,19 +135,16 @@ class LoRaManager:
                     break
                 if retry < 2:
                     logger.warning("reset_chip: chip unresponsive, re-resetting")
-                    exp.config = 0x03
-                    time.sleep_ms(200)
-                    exp.config = 0x13
-                    time.sleep_ms(200)
+                    LoRaManager._pulse_reset()
             else:
                 logger.warning("reset_chip: FAILED after 3 tries")
                 return False
             if __debug__:
-                logger.debug("LoRa chip reset via CH32 expander")
+                logger.debug("LoRa chip reset")
             return True
         except Exception as e:
             if __debug__:
-                logger.debug("CH32 LoRa reset failed: %s", e)
+                logger.debug("LoRa reset failed: %s", e)
             return False
 
     @staticmethod
