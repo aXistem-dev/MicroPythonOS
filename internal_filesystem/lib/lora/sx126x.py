@@ -235,7 +235,10 @@ class _SX126x(BaseModem):
         self._cmd(
             ">BHHHH",
             _CMD_CFG_DIO_IRQ,
-            (_IRQ_RX_DONE | _IRQ_TX_DONE | _IRQ_TIMEOUT | _IRQ_CRC_ERR),  # IRQ mask
+            # IRQ mask; PREAMBLE_DETECTED and HEADER_VALID let a polling app see that a
+            # packet is arriving, so it does not transmit over it.
+            (_IRQ_RX_DONE | _IRQ_TX_DONE | _IRQ_TIMEOUT | _IRQ_CRC_ERR
+             | _IRQ_PREAMBLE_DETECTED | _IRQ_HEADER_VALID),
             (_IRQ_RX_DONE | _IRQ_TX_DONE | _IRQ_TIMEOUT) if dio1 else 0,  # DIO1 mask
             0x0,  # DIO2Mask, not used
             0x0,  # DIO3Mask, not used

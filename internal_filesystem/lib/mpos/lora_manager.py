@@ -122,7 +122,7 @@ class LoRaManager:
                     if LoRaManager._dio2_rf_sw:
                         r._cmd("BB", 0x9D, 1)  # SET_DIO2_AS_RF_SWITCH_CTRL: a reset clears it
                     r._cmd(">BHHHH", 0x08,
-                        579,    # IrqMask: TX(1)|RX(2)|CRC_ERR(64)|TIMEOUT(512)
+                        599,    # IrqMask: TX(1)|RX(2)|PREAMBLE(4)|HEADER_VALID(16)|CRC_ERR(64)|TIMEOUT(512)
                         515,    # DIO1Mask: TX(1)|RX(2)|TIMEOUT(512)
                         0, 0)   # DIO2Mask, DIO3Mask
                     r._clear_irq()

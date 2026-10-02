@@ -9,11 +9,13 @@ from mpos.lora_manager import LoRaManager  # noqa: E402
 class FakeRadio:
     def __init__(self, status=0x20):
         self.cmds = []
+        self.args = []
         self.status = status
         self._sleep = self._configured = self._rx = None
 
     def _cmd(self, fmt, *args, n_read=0, **kw):
         self.cmds.append(args[0] if args else None)
+        self.args.append(args)
         return bytes([self.status] * max(n_read, 1))
 
     def _clear_irq(self):
@@ -66,6 +68,8 @@ class TestBoardResetHook(unittest.TestCase):
         self.assertTrue(LoRaManager.reset_chip())
         self.assertEqual(self.pulses, [1])
         self.assertIn(0x08, radio.cmds)   # SetDioIrqParams re-sent after the reset
+        irq = [a for a in radio.args if a and a[0] == 0x08][0]
+        self.assertEqual(irq[1], 0x0257)  # incl. PREAMBLE_DETECTED and HEADER_VALID
 
     def test_unresponsive_chip_is_reset_three_times(self):
         LoRaManager.radioChip = FakeChip(FakeRadio(status=0x00))

@@ -69,7 +69,7 @@ class TestPolledIrqMask(unittest.TestCase):
         frames = cfg_dio_irq_frames(self.make(dio1=None))
         self.assertTrue(frames, "no SetDioIrqParams sent without dio1")
         f = frames[-1]
-        self.assertEqual((f[1] << 8) | f[2], 0x0243)   # IrqMask
+        self.assertEqual((f[1] << 8) | f[2], 0x0257)   # IrqMask, incl. PREAMBLE_DETECTED and HEADER_VALID
         self.assertEqual((f[3] << 8) | f[4], 0x0000)   # DIO1 mask: nothing routed
 
     def test_dio1_mask_unchanged_when_pin_given(self):
@@ -78,7 +78,7 @@ class TestPolledIrqMask(unittest.TestCase):
                 self.handler = handler
         frames = cfg_dio_irq_frames(self.make(dio1=Dio1()))
         f = frames[-1]
-        self.assertEqual((f[1] << 8) | f[2], 0x0243)
+        self.assertEqual((f[1] << 8) | f[2], 0x0257)
         self.assertEqual((f[3] << 8) | f[4], 0x0203)
 
 
