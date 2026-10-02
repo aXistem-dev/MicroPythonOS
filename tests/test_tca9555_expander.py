@@ -23,12 +23,22 @@ class FakeDevice:
 
 
 class FakeIntPin:
-    def __init__(self):
+    """Expander /INT line: open-drain, active low. `levels` is consumed by value() calls, then `level`."""
+
+    def __init__(self, level=1, levels=None, log=None):
         self.handler = None
         self.trigger = None
+        self.level = level
+        self.levels = list(levels or [])
+        self.log = log
 
     def irq(self, trigger=None, handler=None):
         self.trigger, self.handler = trigger, handler
+        if self.log is not None:
+            self.log.append("irq")
+
+    def value(self):
+        return self.levels.pop(0) if self.levels else self.level
 
 
 inject_mocks({
@@ -131,6 +141,57 @@ class TestExpanderIRQ(unittest.TestCase):
         f(a)
         int_pin.handler(int_pin)
         self.assertEqual(len(scheduled), 2)
+
+    def test_irq_attached_before_baseline_read(self):
+        log = []
+        reads = []
+        orig = self.tca.read_inputs
+        self.tca.read_inputs = lambda: (log.append("read"), orig())[1]
+        ExpanderIRQ(self.tca, FakeIntPin(log=log), schedule=lambda f, a: None)
+        self.assertEqual(log[0], "irq")
+
+    def test_service_rereads_while_int_held_low(self):
+        int_pin = FakeIntPin()
+        scheduled = []
+        irq = ExpanderIRQ(self.tca, int_pin, schedule=lambda f, a: scheduled.append((f, a)))
+        irq.register(3, self.calls.append)
+        reads = []
+        orig = self.tca.read_inputs
+        self.tca.read_inputs = lambda: (reads.append(1), orig())[1]
+        int_pin.levels = [0, 1]              # still low after the first read, released after the second
+        self.dev.regs[0] = 0x08
+        int_pin.handler(int_pin)
+        f, a = scheduled[0]
+        f(a)
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(self.calls, [3])
+
+    def test_check_reads_only_when_int_low(self):
+        int_pin = FakeIntPin()
+        irq = ExpanderIRQ(self.tca, int_pin, schedule=lambda f, a: None)
+        irq.register(3, self.calls.append)
+        reads = []
+        orig = self.tca.read_inputs
+        self.tca.read_inputs = lambda: (reads.append(1), orig())[1]
+        self.assertFalse(irq.check())
+        self.assertEqual(reads, [])
+        int_pin.level = 0
+        self.dev.regs[0] = 0x08
+        self.assertTrue(irq.check())
+        self.assertEqual(self.calls, [3])
+
+    def test_full_schedule_queue_is_recovered_by_check(self):
+        def full(f, a):
+            raise RuntimeError("schedule queue full")
+        int_pin = FakeIntPin()
+        irq = ExpanderIRQ(self.tca, int_pin, schedule=full)
+        irq.register(3, self.calls.append)
+        self.dev.regs[0] = 0x08
+        int_pin.level = 0
+        int_pin.handler(int_pin)             # edge lost: queue full
+        self.assertEqual(self.calls, [])
+        irq.check()                          # the periodic safety net
+        self.assertEqual(self.calls, [3])
 
     def test_unregister(self):
         self.irq.register(3, self.calls.append)

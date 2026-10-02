@@ -1,9 +1,11 @@
 # Shares a TCA9555/PCA9535 open-drain /INT line between per-pin callbacks.
 #
 # The expander pulls /INT low on any input change and releases it when the input port is read.
-# The GPIO handler only schedules _service(); _service reads both ports once and calls the
-# handlers of the pins whose level changed in the requested direction. I2C never runs in a hard
-# IRQ, and a burst of edges (BUSY toggling, touch INT) collapses into one read.
+# The GPIO handler only schedules _service(); _service reads both ports and calls the handlers of
+# the pins whose level changed in the requested direction, re-reading while /INT is still held low.
+# I2C never runs in a hard IRQ, and a burst of edges (BUSY toggling, touch INT) collapses into one
+# service call. A lost edge (change before the IRQ was attached, full schedule queue) leaves /INT
+# low with no further falling edge, so callers run check() periodically as a safety net.
 
 import micropython
 
@@ -12,14 +14,17 @@ class ExpanderIRQ:
     RISING = 1   # == machine.Pin.IRQ_RISING on ESP32
     FALLING = 2  # == machine.Pin.IRQ_FALLING on ESP32
 
+    _MAX_REREADS = 4
+
     def __init__(self, tca, int_pin, schedule=None):
         self._tca = tca
         self._schedule = schedule or micropython.schedule
         self._handlers = {}
         self._pending = False
-        self._last = tca.read_inputs()
-        int_pin.irq(trigger=self.FALLING, handler=self._isr)
         self._int_pin = int_pin
+        int_pin.irq(trigger=self.FALLING, handler=self._isr)  # attach first, then take the baseline
+        self._last = tca.read_inputs()
+        self.check()
 
     def register(self, pin, handler, trigger=RISING):
         self._handlers[pin & 0x0F] = (handler, trigger)
@@ -33,12 +38,22 @@ class ExpanderIRQ:
         self._pending = True
         try:
             self._schedule(self._service, None)
-        except RuntimeError:  # schedule queue full; the next edge or a poll() catches up
+        except RuntimeError:  # schedule queue full: /INT stays low, check() catches up
             self._pending = False
 
     def _service(self, _arg):
         self._pending = False
+        for _ in range(self._MAX_REREADS):
+            self.poll()
+            if self._int_pin.value():
+                break
+
+    def check(self):
+        """Service /INT if it is held low with nothing scheduled. Returns True if it read the ports."""
+        if self._int_pin.value():
+            return False
         self.poll()
+        return True
 
     def poll(self):
         now = self._tca.read_inputs()
