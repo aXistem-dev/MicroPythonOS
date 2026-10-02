@@ -81,6 +81,14 @@ class TCA9555:
             p = machine.Pin(pin, machine.Pin.IN)
             return p.value()
 
+    def read_inputs(self):
+        """Read both input ports in one transaction.
+
+        Unlike digital_read() this never rewrites CONFIG, so it is safe for pins that are inputs by
+        design (BUSY lines, interrupt lines) and it clears the expander's /INT output.
+        """
+        return self._read_word(self.REG_INPUT)
+
 
 class TCA9555Pin:
     """
@@ -99,6 +107,43 @@ class TCA9555Pin:
             # No readback support for output-only pins
             return None
         self.tca.digital_write(self.pin, v)
+
+    def __call__(self, v=None):
+        return self.value(v)
+
+
+class ExpanderPin:
+    """machine.Pin-like expander pin with real input readback.
+
+    Accepts the pin number with or without the 0x40 marker. init(mode, value=) sets the output
+    level before switching the pin to output, so the line never glitches. Reading uses the input
+    register and leaves CONFIG alone.
+    """
+
+    def __init__(self, tca, pin, mode=None, value=None):
+        self._tca = tca
+        self.pin = pin & 0x0F
+        self._mask = 1 << self.pin
+        if mode is not None:
+            self.init(mode, value)
+
+    def init(self, mode, value=None):
+        tca = self._tca
+        if mode == machine.Pin.OUT:
+            if value is not None:
+                if value:
+                    tca.output_states |= self._mask
+                else:
+                    tca.output_states &= ~self._mask
+                tca._write_word(tca.REG_OUTPUT, tca.output_states)
+            tca.pin_mode(0x40 | self.pin, machine.Pin.OUT)
+        else:
+            tca.pin_mode(0x40 | self.pin, machine.Pin.IN)
+
+    def value(self, v=None):
+        if v is None:
+            return 1 if self._tca.read_inputs() & self._mask else 0
+        self._tca.digital_write(0x40 | self.pin, v)
 
     def __call__(self, v=None):
         return self.value(v)
