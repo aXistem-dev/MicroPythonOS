@@ -212,7 +212,7 @@ echo "Symlinking secp256k1-embedded-ecdh for unix and macOS builds..."
 ln -sf ../../secp256k1-embedded-ecdh "$codebasedir"/lvgl_micropython/ext_mod/secp256k1-embedded-ecdh
 echo "Symlinking c_mpos for unix and macOS builds..."
 ln -sf ../../c_mpos "$codebasedir"/lvgl_micropython/ext_mod/c_mpos
-ln -sf ../../c_meshcrypto "$codebasedir"/lvgl_micropython/ext_mod/c_meshcrypto
+ln -sfn ../../c_meshcrypto "$codebasedir"/lvgl_micropython/ext_mod/c_meshcrypto
 
 echo "Applying lvgl_micropython esp32 uart repl enable/disable at runtime patch..."
 apply_patch "$codebasedir"/lvgl_micropython/lib/micropython "$codebasedir"/lvgl_micropython/esp32_uart_repl_runtime.patch
