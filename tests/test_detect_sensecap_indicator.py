@@ -23,5 +23,23 @@ class TestProbe(unittest.TestCase):
         self.assertFalse(probe.present(FakeI2C({0x20, 0x38})))  # waveshare 3.5 pair
 
 
+class AckAll:
+    def writeto(self, addr, buf):
+        pass
+
+
+class Exploding:
+    def writeto(self, addr, buf):
+        raise ValueError("bus error")
+
+
+class TestProbeRobustness(unittest.TestCase):
+    def test_bus_that_acks_every_address_is_not_an_indicator(self):
+        self.assertFalse(probe.present(AckAll()))
+
+    def test_unexpected_exception_does_not_escape(self):
+        self.assertFalse(probe.present(Exploding()))
+
+
 if __name__ == "__main__":
     unittest.main()
