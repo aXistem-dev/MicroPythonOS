@@ -115,6 +115,7 @@ if [ -z "$target" ]; then
     echo "Example: $0 esp32s3 --usb (USB host support: display adapters + HID, ESP32-S3 USB host)"
     echo "Example: $0 unphone"
     echo "Example: $0 lilygo_t4"
+    echo "Example: $0 sensecap_indicator"
     echo "Example: $0 clean"
 	exit 1
 fi
@@ -311,7 +312,7 @@ if [ ! -f "$codebasedir"/lvgl_micropython/lib/micropython/mpy-cross/build/mpy-cr
 fi
 
 echo "Refreshing freezefs..."
-if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" ]; then
+if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" -o "$target" == "sensecap_indicator" ]; then
 	builtin_march="xtensawin"
 else
 	case "$(uname -m)" in
@@ -335,7 +336,7 @@ if [ "$target" != "web" ]; then
 	reset_web_port_changes
 fi
 
-if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" ]; then
+if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" -o "$target" == "sensecap_indicator" ]; then
 	# Cleanup compiled .py files, otherwise if one from lib/ gets delected, the old .mpy might be used
 	rm -r lvgl_micropython/lib/micropython/ports/esp32/build-ESP32_GENERIC-SPIRAM/frozen_mpy 2>/dev/null
 	rm -r lvgl_micropython/lib/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/frozen_mpy 2>/dev/null
@@ -371,7 +372,7 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
 		flash_size="4"
 		otasupport="" # too small for 2 OTA partitions + internal storage
 	else # esp32s3 or unphone
-        if [ "$target" == "unphone" ]; then
+        if [ "$target" == "unphone" -o "$target" == "sensecap_indicator" ]; then
             flash_size="8"
             otasupport="" # too small for 2 OTA partitions + internal storage
         fi
@@ -384,6 +385,12 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
         #extra_configs="$extra_configs --py-freertos"
         # Enable UART based REPL, in addition to the USB-CDC or JTAG REPL. Can be disabled with esp.uart_repl(False)
         extra_configs="$extra_configs --enable-uart-repl=y"
+        if [ "$target" == "sensecap_indicator" ]; then
+            # The board's USB-C is a CH340 on UART0; GPIO19/20 (the S3's native USB pads) carry the
+            # RP2040 UART, so TinyUSB device mode must not claim them.
+            extra_configs="$extra_configs --enable-cdc-repl=n"
+            export MPOS_NO_USBDEV=1
+        fi
         if [ "$usbhost" == "1" ]; then
             # USB host (needs the adapter behind a USB hub to
             # enumerate: explicit IDF usb_host external-hub support, off by
@@ -408,7 +415,7 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
         fi
 	fi
 
-	if [ "$BOARD_VARIANT" == "SPIRAM" -o "$BOARD_VARIANT" == "SPIRAM_OCT" ]; then
+	if [ "$BOARD_VARIANT" == "SPIRAM" -o "$BOARD_VARIANT" == "SPIRAM_OCT" ] && [ "$target" != "sensecap_indicator" ]; then
 		# Camera only works on boards configured with spiram, otherwise the build breaks
 		extra_configs="$extra_configs USER_C_MODULE=$codebasedir/micropython-camera-API/src/micropython.cmake"
 	fi
