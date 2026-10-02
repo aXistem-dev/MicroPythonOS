@@ -390,6 +390,11 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
             # RP2040 UART, so TinyUSB device mode must not claim them.
             extra_configs="$extra_configs --enable-cdc-repl=n"
             export MPOS_NO_USBDEV=1
+            # The RGB panel's framebuffer is in PSRAM; a DMA underrun (e.g. during Wi-Fi start or a
+            # flash write) leaves the pixel stream offset by a byte and the colours permanently off.
+            # Restart the transfer every VSYNC so a desync heals within one frame.
+            # (CONFIG_LCD_RGB_ISR_IRAM_SAFE hangs display init: lcd_bus's callbacks are not in IRAM.)
+            extra_configs="$extra_configs CONFIG_LCD_RGB_RESTART_IN_VSYNC=y"
         fi
         if [ "$usbhost" == "1" ]; then
             # USB host (needs the adapter behind a USB hub to
