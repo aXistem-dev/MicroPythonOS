@@ -32,7 +32,7 @@ from drivers.display.st7701s import ST7701S
 from drivers.display.st7701s.hybrid_spi3wire import HybridSpi3Wire
 from drivers.io_expander.expander_irq import ExpanderIRQ
 from drivers.io_expander.tca9555 import TCA9555, ExpanderPin
-from mpos import InputManager, SensorManager
+from mpos import InputManager, SensorManager, TaskManager
 
 I2C_SDA = const(39)
 I2C_SCL = const(40)
@@ -132,6 +132,7 @@ def set_backlight(percent):
     backlight.duty_u16(int(percent * 65535 // 100))
 
 
+mpos.ui.main_display.set_backlight = set_backlight  # the panel driver has no backlight pin of its own
 mpos.ui.main_display.set_backlight(100)
 
 # 3) touch: FT6336U at 0x48, polled
@@ -186,6 +187,15 @@ except Exception as e:
 
 # 5) shared expander interrupt + radio wiring for the LoRa layer (radio itself is set up there)
 expander_irq = ExpanderIRQ(tca, machine.Pin(EXP_INT, machine.Pin.IN, machine.Pin.PULL_UP))
+
+
+async def _expander_irq_safety_net():
+    while True:
+        expander_irq.check()
+        await TaskManager.sleep_ms(100)
+
+
+TaskManager.create_supervised_task(_expander_irq_safety_net, restart_on_return=True)
 _tcxo_high = sum(_tcxo() for _ in range(5))
 radio_pins = {
     "nss": radio_nss, "rst": radio_rst, "busy": radio_busy, "dio1": radio_dio1,
