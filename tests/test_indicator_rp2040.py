@@ -29,6 +29,8 @@ class FakeRP2040:
         self.nack_next = False
         self.prefix = b""                     # bytes sent ahead of the next response
         self.chunked = 0                      # deliver responses N bytes at a time
+        self.busy_for = 0                     # report the card busy this many more times
+        self.drop_after_handling = 0          # handle the next N requests, lose the reply
 
     # requests ------------------------------------------------------------ #
     def handle(self, msg):
@@ -77,6 +79,9 @@ class FakeRP2040:
         return {"status": proto.I2C_OK, "read_data": bytes(dev[reg:reg + n])}
 
     def _card(self):
+        if self.busy_for:
+            self.busy_for -= 1
+            return proto.FILE_BUSY
         if self.card == "none":
             return proto.FILE_NO_CARD
         if self.card == "busy":
@@ -182,6 +187,9 @@ class FakeUART:
             payload = self._inbuf[4:4 + n]
             self._inbuf = self._inbuf[4 + n:]
             resp = self.rp.handle(proto.decode(payload))
+            if resp is not None and self.rp.drop_after_handling:
+                self.rp.drop_after_handling -= 1
+                resp = None
             if self.rp.prefix:
                 self.rx += self.rp.prefix
                 self.rp.prefix = b""
@@ -311,6 +319,212 @@ class TestLink(unittest.TestCase):
         while len(done) < 2 and time.ticks_diff(time.ticks_ms(), t0) < 5000:
             time.sleep_ms(10)
         self.assertEqual(results, {0x44: True, 0x62: True})
+
+
+# --- SD card as a filesystem ------------------------------------------- #
+
+from drivers.indicator_rp2040 import sdfs
+
+
+def make_sd(**kw):
+    from drivers.indicator_rp2040.sdfs import SDCard
+    rp, uart, link = make_link()
+    return rp, SDCard(link, busy_wait_ms=1, **kw)
+
+
+def _errno(fn, *args):
+    try:
+        fn(*args)
+    except OSError as e:
+        return e.errno
+    return None
+
+
+class TestSDNoCard(unittest.TestCase):
+
+    def test_every_operation_says_no_device(self):
+        rp, sd = make_sd()
+        rp.card = "none"
+        self.assertEqual(_errno(sd.stat, "/a.txt"), errno.ENODEV)
+        self.assertEqual(_errno(lambda: list(sd.ilistdir("/"))), errno.ENODEV)
+        self.assertEqual(_errno(sd.open, "/a.txt", "rb"), errno.ENODEV)
+        self.assertEqual(_errno(sd.open, "/a.txt", "wb"), errno.ENODEV)
+        self.assertEqual(_errno(sd.statvfs, "/"), errno.ENODEV)
+        self.assertFalse(sd.present())
+
+    def test_a_card_still_mounting_is_waited_for(self):
+        rp, sd = make_sd(busy_retries=10)
+        rp.files["/a.txt"] = bytearray(b"hello")
+        rp.busy_for = 3
+        with sd.open("/a.txt", "rb") as f:
+            self.assertEqual(f.read(), b"hello")
+
+    def test_a_card_busy_too_long_is_ebusy(self):
+        rp, sd = make_sd(busy_retries=3)
+        rp.files["/a.txt"] = bytearray(b"hello")
+        rp.busy_for = 100
+        self.assertEqual(_errno(sd.open, "/a.txt", "rb"), sdfs.EBUSY)
+
+
+class TestSDRead(unittest.TestCase):
+
+    DATA = bytes(range(256)) * 40          # 10240 bytes: three chunks
+
+    def setUp(self):
+        self.rp, self.sd = make_sd()
+        self.rp.files["/tiles/12/a.png"] = bytearray(self.DATA)
+        self.rp.dirs.update(("/tiles", "/tiles/12"))
+
+    def test_read_all(self):
+        with self.sd.open("/tiles/12/a.png", "rb") as f:
+            self.assertEqual(f.read(), self.DATA)
+        gets = [m["file_transfer"] for m in self.rp.received if "file_transfer" in m]
+        self.assertTrue(all(g["length"] <= 4096 for g in gets))
+
+    def test_read_in_odd_sizes(self):
+        out = b""
+        with self.sd.open("/tiles/12/a.png", "rb") as f:
+            while True:
+                part = f.read(1000)
+                if not part:
+                    break
+                out += part
+        self.assertEqual(out, self.DATA)
+
+    def test_seek_tell_and_readinto(self):
+        f = self.sd.open("/tiles/12/a.png", "rb")
+        f.seek(5000)
+        self.assertEqual(f.tell(), 5000)
+        buf = bytearray(300)
+        self.assertEqual(f.readinto(buf), 300)
+        self.assertEqual(bytes(buf), self.DATA[5000:5300])
+        f.seek(-10, 2)
+        self.assertEqual(f.read(), self.DATA[-10:])
+        f.seek(-20, 1)
+        self.assertEqual(f.read(5), self.DATA[-20:-15])
+        self.assertEqual(f.read(0), b"")
+        f.seek(0, 2)
+        self.assertEqual(f.read(10), b"")
+        f.close()
+
+    def test_missing_file_and_directory(self):
+        self.assertEqual(_errno(self.sd.open, "/nope.png", "rb"), errno.ENOENT)
+        self.assertEqual(_errno(self.sd.open, "/tiles", "rb"), errno.EISDIR)
+
+    def test_stat(self):
+        st = self.sd.stat("/tiles/12/a.png")
+        self.assertEqual(st[0], 0x8000)
+        self.assertEqual(st[6], len(self.DATA))
+        self.assertEqual(self.sd.stat("/tiles")[0], 0x4000)
+        self.assertEqual(self.sd.stat("/")[0], 0x4000)
+        self.assertEqual(_errno(self.sd.stat, "/nope"), errno.ENOENT)
+
+    def test_text_mode(self):
+        self.rp.files["/notes.txt"] = bytearray("one\ntwo caf\u00e9\nthree".encode())
+        with self.sd.open("/notes.txt", "r") as f:
+            self.assertEqual(f.readline(), "one\n")
+            self.assertEqual(f.read(), "two caf\u00e9\nthree")
+        with self.sd.open("/notes.txt") as f:
+            self.assertEqual([line for line in f], ["one\n", "two caf\u00e9\n", "three"])
+
+    def test_a_reply_lost_once_is_retried(self):
+        self.rp.drop = 1
+        self.sd.link.timeout_ms = 40
+        with self.sd.open("/tiles/12/a.png", "rb") as f:
+            self.assertEqual(f.read(), self.DATA)
+
+
+class TestSDList(unittest.TestCase):
+
+    def test_listing_pages_through_a_big_directory(self):
+        rp, sd = make_sd()
+        rp.dirs.add("/tiles")
+        for i in range(40):
+            rp.files["/f%02d.txt" % i] = bytearray(b"x")
+        names = [(e[0], e[1]) for e in sd.ilistdir("/")]
+        self.assertEqual(names[0], ("tiles", 0x4000))
+        self.assertEqual(len(names), 41)
+        self.assertEqual(names[-1], ("f39.txt", 0x8000))
+
+    def test_listing_a_file_or_nothing(self):
+        rp, sd = make_sd()
+        rp.files["/a.txt"] = bytearray(b"x")
+        self.assertEqual(_errno(lambda: list(sd.ilistdir("/a.txt"))), sdfs.ENOTDIR)
+        self.assertEqual(_errno(lambda: list(sd.ilistdir("/nope"))), errno.ENOENT)
+
+
+class TestSDWrite(unittest.TestCase):
+
+    def test_write_in_chunks(self):
+        rp, sd = make_sd()
+        data = bytes(range(251)) * 50       # 12550 bytes
+        with sd.open("/out.bin", "wb") as f:
+            for i in range(0, len(data), 777):
+                f.write(data[i:i + 777])
+        self.assertEqual(bytes(rp.files["/out.bin"]), data)
+        puts = [m["file_transfer"] for m in rp.received if "file_transfer" in m]
+        self.assertTrue(all(len(p.get("filedata", b"")) <= 4096 for p in puts))
+
+    def test_overwrite_and_append(self):
+        rp, sd = make_sd()
+        rp.files["/log.txt"] = bytearray(b"old content")
+        with sd.open("/log.txt", "w") as f:
+            f.write("first\n")
+        with sd.open("/log.txt", "a") as f:
+            f.write("second\n")
+        with sd.open("/new.txt", "ab") as f:
+            f.write(b"fresh")
+        self.assertEqual(bytes(rp.files["/log.txt"]), b"first\nsecond\n")
+        self.assertEqual(bytes(rp.files["/new.txt"]), b"fresh")
+
+    def test_a_chunk_whose_reply_was_lost_is_not_written_twice(self):
+        rp, sd = make_sd()
+        sd.link.timeout_ms = 40
+        f = sd.open("/x.bin", "wb")
+        f.write(b"a" * 5000)
+        rp.drop_after_handling = 1
+        f.close()
+        self.assertEqual(bytes(rp.files["/x.bin"]), b"a" * 5000)
+
+    def test_mkdir_remove_and_unsupported(self):
+        rp, sd = make_sd()
+        sd.mkdir("/tiles/12/2100")
+        self.assertTrue("/tiles/12/2100" in rp.dirs)
+        with sd.open("/tiles/12/2100/1360.png", "wb") as f:
+            f.write(b"png")
+        sd.remove("/tiles/12/2100/1360.png")
+        self.assertFalse("/tiles/12/2100/1360.png" in rp.files)
+        self.assertEqual(_errno(sd.rename, "/a", "/b"), errno.EPERM)
+        self.assertEqual(_errno(sd.rmdir, "/tiles"), errno.EPERM)
+        self.assertEqual(_errno(sd.open, "/nodir/x.bin", "wb"), errno.EIO)
+
+    def test_statvfs(self):
+        rp, sd = make_sd()
+        rp.files["/a"] = bytearray(8192)
+        st = sd.statvfs("/")
+        self.assertEqual(st[0] * st[2], 8 << 30)
+        self.assertEqual(st[0] * st[3], (8 << 30) - 8192)
+
+
+class TestSDMounted(unittest.TestCase):
+
+    def test_os_functions_through_a_mount(self):
+        import os
+        rp, sd = make_sd()
+        rp.dirs.add("/maps")
+        rp.files["/maps/a.txt"] = bytearray(b"tile")
+        os.mount(sd, "/sdtest")
+        try:
+            self.assertEqual(sorted(os.listdir("/sdtest")), ["maps"])
+            self.assertEqual(os.listdir("/sdtest/maps"), ["a.txt"])
+            with open("/sdtest/maps/a.txt", "rb") as f:
+                self.assertEqual(f.read(), b"tile")
+            self.assertEqual(os.stat("/sdtest/maps/a.txt")[6], 4)
+            with open("/sdtest/maps/b.txt", "w") as f:
+                f.write("new")
+            self.assertEqual(bytes(rp.files["/maps/b.txt"]), b"new")
+        finally:
+            os.umount("/sdtest")
 
 
 if __name__ == "__main__":
