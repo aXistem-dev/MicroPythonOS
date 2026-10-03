@@ -527,5 +527,68 @@ class TestSDMounted(unittest.TestCase):
             os.umount("/sdtest")
 
 
+# --- Grove I2C ----------------------------------------------------------- #
+
+def make_i2c():
+    from drivers.indicator_rp2040.i2c import RemoteI2C
+    rp, uart, link = make_link()
+    return rp, RemoteI2C(link)
+
+
+def _i2c_requests(rp):
+    return [m["i2c_transaction"] for m in rp.received if "i2c_transaction" in m]
+
+
+class TestGroveI2C(unittest.TestCase):
+
+    def test_scan_empty_and_with_a_device(self):
+        rp, i2c = make_i2c()
+        self.assertEqual(i2c.scan(), [])
+        rp.devices[0x44] = bytearray(8)
+        rp.devices[0x62] = bytearray(8)
+        self.assertEqual(i2c.scan(), [0x44, 0x62])
+
+    def test_register_reads_and_writes(self):
+        rp, i2c = make_i2c()
+        rp.devices[0x44] = bytearray(b"\x10\x11\x12\x13\x14\x15")
+        self.assertEqual(i2c.readfrom_mem(0x44, 1, 2), b"\x11\x12")
+        buf = bytearray(3)
+        i2c.readfrom_mem_into(0x44, 2, buf)
+        self.assertEqual(bytes(buf), b"\x12\x13\x14")
+        i2c.writeto_mem(0x44, 4, b"\xaa\xbb")
+        self.assertEqual(bytes(rp.devices[0x44][4:6]), b"\xaa\xbb")
+        self.assertEqual(i2c.writeto(0x44, b"\x00\x01"), 2)
+        self.assertEqual(i2c.readfrom(0x44, 2), b"\x01\x11")
+        i2c.writevto(0x44, (b"\x03", b"\x33"))
+        self.assertEqual(rp.devices[0x44][3], 0x33)
+
+    def test_write_without_stop_joins_the_following_read(self):
+        rp, i2c = make_i2c()
+        rp.devices[0x44] = bytearray(b"\x00\x01\x02\x03")
+        i2c.writeto(0x44, b"\x02", False)
+        out = bytearray(2)
+        i2c.readfrom_into(0x44, out)
+        self.assertEqual(bytes(out), b"\x02\x03")
+        self.assertEqual(_i2c_requests(rp)[-1], {"address": 0x44, "write_data": b"\x02", "read_len": 2})
+        self.assertEqual(len(_i2c_requests(rp)), 1)
+
+    def test_sixteen_bit_register_address(self):
+        rp, i2c = make_i2c()
+        rp.devices[0x62] = bytearray(4)
+        i2c.readfrom_mem(0x62, 0x3682, 3, addrsize=16)
+        self.assertEqual(_i2c_requests(rp)[-1]["write_data"], b"\x36\x82")
+
+    def test_absent_device_is_enodev(self):
+        rp, i2c = make_i2c()
+        self.assertEqual(_errno(i2c.readfrom_mem, 0x44, 0, 2), errno.ENODEV)
+        self.assertEqual(_errno(i2c.writeto, 0x44, b"\x00"), errno.ENODEV)
+
+    def test_too_long_a_read(self):
+        rp, i2c = make_i2c()
+        rp.devices[0x44] = bytearray(8)
+        with self.assertRaises(ValueError):
+            i2c.readfrom(0x44, 300)
+
+
 if __name__ == "__main__":
     unittest.main()
