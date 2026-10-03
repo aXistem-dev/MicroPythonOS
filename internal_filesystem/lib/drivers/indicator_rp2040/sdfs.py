@@ -50,6 +50,10 @@ class SDCard:
         """proto.SD_MOUNT / SD_EJECT / SD_FORMAT; returns the card info afterwards."""
         return self.link.request({"sd_command": cmd}, timeout_ms=30000)["sd_info"]
 
+    def format(self):
+        """Wipe the card and put a fresh FAT on it (the RP2040 does it). True when mounted after."""
+        return bool(self.command(proto.SD_FORMAT)["present"])
+
     # --- VFS protocol ---------------------------------------------------- #
     def mount(self, readonly, mkfs):
         pass

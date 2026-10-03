@@ -498,6 +498,13 @@ class TestSDWrite(unittest.TestCase):
         self.assertEqual(_errno(sd.rmdir, "/tiles"), errno.EPERM)
         self.assertEqual(_errno(sd.open, "/nodir/x.bin", "wb"), errno.EIO)
 
+    def test_format_asks_the_rp2040(self):
+        rp, sd = make_sd()
+        self.assertTrue(sd.format())
+        self.assertEqual([m["sd_command"] for m in rp.received if "sd_command" in m], [proto.SD_FORMAT])
+        rp.card = "none"
+        self.assertFalse(sd.format())
+
     def test_statvfs(self):
         rp, sd = make_sd()
         rp.files["/a"] = bytearray(8192)

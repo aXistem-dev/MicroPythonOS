@@ -13,12 +13,16 @@ class SDCardManager:
 
     @classmethod
     def init(cls, mode=None, spi_bus=None, cs_pin=None, cmd_pin=None, clk_pin=None,
-             d0_pin=None, d1_pin=None, d2_pin=None, d3_pin=None, slot=1, width=None, freq=20000000):
+             d0_pin=None, d1_pin=None, d2_pin=None, d3_pin=None, slot=1, width=None, freq=20000000,
+             vfs=None):
+        """vfs: a ready filesystem object for a card this chip does not drive itself (e.g. one
+        behind a co-processor). It is mounted as is; it may offer present() (is a card in
+        the slot) and format()."""
         cls._instance = cls(
             mode=mode, spi_bus=spi_bus, cs_pin=cs_pin,
             cmd_pin=cmd_pin, clk_pin=clk_pin, d0_pin=d0_pin,
             d1_pin=d1_pin, d2_pin=d2_pin, d3_pin=d3_pin,
-            slot=slot, width=width, freq=freq
+            slot=slot, width=width, freq=freq, vfs=vfs
         )
 
     @classmethod
@@ -58,9 +62,15 @@ class SDCardManager:
         return cls._instance
 
     def __init__(self, mode=None, spi_bus=None, cs_pin=None, cmd_pin=None, clk_pin=None,
-                 d0_pin=None, d1_pin=None, d2_pin=None, d3_pin=None, slot=1, width=None, freq=20000000):
+                 d0_pin=None, d1_pin=None, d2_pin=None, d3_pin=None, slot=1, width=None, freq=20000000,
+                 vfs=None):
         self._sdcard = None
         self._mode = None
+
+        if vfs is not None:
+            self._mode = 'vfs'
+            self._sdcard = vfs
+            return
 
         # Auto-detect mode: if SDIO pins provided, use SDIO; otherwise use SPI
         if cmd_pin is not None or clk_pin is not None or d0_pin is not None:
@@ -210,7 +220,11 @@ class SDCardManager:
                 if __debug__: logger.debug("  - Unmounted %s (if it was mounted)", mount_point)
             except OSError:
                 if __debug__: logger.debug("  - No prior mount found for %s, proceeding with format", mount_point)
-            vfs.VfsFat.mkfs(self._sdcard)
+            if self._mode == 'vfs':
+                if not self._sdcard.format():
+                    raise OSError(5)
+            else:
+                vfs.VfsFat.mkfs(self._sdcard)
             if __debug__: logger.debug("SD card formatted successfully as FAT32")
             return True
         except OSError as e:
@@ -261,6 +275,8 @@ class SDCardManager:
                 if __debug__: logger.debug("  - Possible causes: Never mounted, unmounted manually, or card removed")
                 if __debug__: logger.debug("  - Try: Call mount()")
                 return False
+            if self._mode == 'vfs' and hasattr(self._sdcard, "present"):
+                return bool(self._sdcard.present())
             try:
                 os.mkdir(f'{mount_point}/_tmp_test')
             except OSError:
