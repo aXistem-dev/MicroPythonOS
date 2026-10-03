@@ -590,5 +590,58 @@ class TestGroveI2C(unittest.TestCase):
             i2c.readfrom(0x44, 300)
 
 
+# --- buzzer ---------------------------------------------------------------- #
+
+def _tones(rp):
+    return [(m["tone"]["frequency_hz"], m["tone"]["duration_ms"]) for m in rp.received if "tone" in m]
+
+
+class TestBuzzer(unittest.TestCase):
+
+    def make(self):
+        from drivers.indicator_rp2040.buzzer import RemoteBuzzer
+        rp, uart, link = make_link()
+        return rp, RemoteBuzzer(link)
+
+    def test_notes_as_the_rtttl_player_plays_them(self):
+        rp, b = self.make()
+        b.freq(523)
+        b.duty_u16(20000)
+        b.duty_u16(0)
+        b.freq(659)
+        b.duty_u16(20000)
+        b.duty_u16(0)
+        self.assertEqual(_tones(rp), [(523, 0), (0, 0), (659, 0), (0, 0)])
+
+    def test_changing_pitch_while_sounding(self):
+        rp, b = self.make()
+        b.freq(440)
+        b.duty_u16(1000)
+        b.freq(880)
+        b.freq(880)
+        self.assertEqual(_tones(rp), [(440, 0), (880, 0)])
+        self.assertEqual(b.freq(), 880)
+
+    def test_nothing_is_sent_while_silent_or_unchanged(self):
+        rp, b = self.make()
+        b.freq(440)
+        b.duty_u16(0)
+        b.duty_u16(500)
+        b.duty_u16(600)
+        self.assertEqual(_tones(rp), [(440, 0)])
+
+    def test_deinit_silences(self):
+        rp, b = self.make()
+        b.freq(440)
+        b.duty_u16(1000)
+        b.deinit()
+        self.assertEqual(_tones(rp)[-1], (0, 0))
+
+    def test_beep(self):
+        rp, b = self.make()
+        b.beep(120)
+        self.assertEqual([m["beep"] for m in rp.received if "beep" in m], [120])
+
+
 if __name__ == "__main__":
     unittest.main()
