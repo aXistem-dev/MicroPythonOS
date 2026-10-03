@@ -42,6 +42,7 @@ class Link:
         self.uart = uart
         self.timeout_ms = timeout_ms
         self.hellos = 0              # unsolicited pings: the RP2040 (re)started
+        self.on_nmea = None          # callable(sentence) for a GPS on the RP2040's serial port
         self._lock = _thread.allocate_lock()
         self._buf = b""             # received, not yet framed (bytes: MicroPython bytearrays
         self._next_id = 1           # cannot delete slices)
@@ -96,6 +97,17 @@ class Link:
                     return reply
                 self._unsolicited(reply)
 
+    def poll(self):
+        """Handle frames that arrived without a request (boot hello, NMEA sentences). Call it
+        now and then when nothing else uses the link; requests do the same on their way."""
+        with self._lock:
+            self._pump()
+            while True:
+                msg = self._next_frame()
+                if msg is None:
+                    return
+                self._unsolicited(msg)
+
     def send(self, msg):
         """Send a request that gets no reply (beep, tone)."""
         with self._lock:
@@ -146,4 +158,10 @@ class Link:
     def _unsolicited(self, msg):
         if msg["id"] == 0 and "ping" in msg:
             self.hellos += 1        # the RP2040 announces a (re)start
-        # nmea lines (a GPS on the second Grove port) and late replies are dropped
+        elif "nmea" in msg:
+            if self.on_nmea is not None:
+                try:
+                    self.on_nmea(msg["nmea"])
+                except Exception as e:
+                    print("indicator_rp2040: nmea callback error:", repr(e))
+        # late replies to requests that already timed out are dropped

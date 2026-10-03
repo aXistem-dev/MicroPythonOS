@@ -1,4 +1,4 @@
-# InterdeviceMessage codec for the SenseCAP Indicator's RP2040 (Meshtastic indicator_rp2040
+# InterdeviceMessage codec for the SenseCAP Indicator's RP2040 co-processor (aXistem-dev/indicator_rp2040
 # firmware, interdevice.proto). Hand-written protobuf: the messages are small and fixed, and a
 # generated runtime would cost more flash than this table.
 #

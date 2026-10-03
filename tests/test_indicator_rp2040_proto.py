@@ -1,5 +1,5 @@
 """indicator_rp2040.proto: the InterdeviceMessage codec spoken with the SenseCAP Indicator's
-RP2040 (Meshtastic indicator_rp2040 firmware). The golden frames below come from the official
+RP2040 (aXistem-dev/indicator_rp2040 firmware). The golden frames below come from the official
 protobuf library and the same interdevice.proto, so equal bytes mean wire compatibility."""
 
 import unittest

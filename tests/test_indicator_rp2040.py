@@ -240,6 +240,24 @@ class TestLink(unittest.TestCase):
         self.assertEqual(link.ping(), 2)
         self.assertEqual(link.hellos, 1)
 
+    def test_nmea_sentences_go_to_the_callback(self):
+        rp, uart, link = make_link()
+        got = []
+        link.on_nmea = got.append
+        rp.prefix = proto.frame(proto.encode({"id": 0, "nmea": "$GPGGA,123519"}))
+        self.assertEqual(link.ping(), 2)
+        self.assertEqual(got, ["$GPGGA,123519"])
+
+    def test_poll_delivers_unsolicited_frames_without_a_request(self):
+        rp, uart, link = make_link()
+        got = []
+        link.on_nmea = got.append
+        uart.rx += proto.frame(proto.encode({"id": 0, "nmea": "$GPRMC,1"}))
+        uart.rx += proto.frame(proto.encode({"id": 0, "ping": 2}))
+        link.poll()
+        self.assertEqual(got, ["$GPRMC,1"])
+        self.assertEqual(link.hellos, 1)
+
     def test_garbage_and_oversized_header_are_resynced(self):
         rp, uart, link = make_link()
         rp.prefix = b"\x00\xff\x94\x94\xc3\xff\xff junk"
