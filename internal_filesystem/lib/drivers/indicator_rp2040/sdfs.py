@@ -34,11 +34,19 @@ class SDCard:
         self.busy_retries = busy_retries
         self.busy_wait_ms = busy_wait_ms
         self._cwd = "/"
+        # With an empty slot the RP2040 keeps retrying the mount and answers "busy" while it
+        # does (most of the time). Once it said "no card", busy means the slot is still empty.
+        self._empty = False
 
     # --- card ------------------------------------------------------------ #
     def info(self):
         """The RP2040's SdCardInfo (present, card_type, fat_type, sizes, busy, unformatted)."""
-        return self.link.request({"get_sd_info": True})["sd_info"]
+        info = self.link.request({"get_sd_info": True})["sd_info"]
+        if info["present"]:
+            self._empty = False
+        elif not info["busy"]:
+            self._empty = True
+        return info
 
     def present(self):
         try:
@@ -156,8 +164,12 @@ class SDCard:
                 if not retry_timeout or timeouts > 1:
                     raise
                 continue
-            if r["status"] != proto.FILE_BUSY:
+            status = r["status"]
+            if status != proto.FILE_BUSY:
+                self._empty = status == proto.FILE_NO_CARD
                 return r
+            if self._empty:
+                raise OSError(errno.ENODEV)
             busy += 1
             if busy > self.busy_retries:
                 raise OSError(EBUSY)
@@ -176,7 +188,7 @@ class SDCard:
             info = self.info()
             if info["present"]:
                 return info
-            if not info["busy"]:
+            if not info["busy"] or self._empty:
                 raise OSError(errno.ENODEV)
             time.sleep_ms(self.busy_wait_ms)
         raise OSError(EBUSY)

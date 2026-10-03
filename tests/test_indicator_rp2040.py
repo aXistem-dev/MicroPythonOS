@@ -359,6 +359,28 @@ class TestSDNoCard(unittest.TestCase):
         with sd.open("/a.txt", "rb") as f:
             self.assertEqual(f.read(), b"hello")
 
+    def test_an_empty_slot_retrying_its_mount_answers_at_once(self):
+        # With no card the RP2040 retries mounting all the time and reports "busy" meanwhile:
+        # once a reply said "no card", busy replies mean the slot is still empty.
+        rp, sd = make_sd(busy_retries=50)
+        rp.card = "none"
+        self.assertEqual(_errno(sd.stat, "/a.txt"), errno.ENODEV)
+        rp.busy_for = 100
+        n = len(rp.received)
+        self.assertEqual(_errno(sd.stat, "/a.txt"), errno.ENODEV)
+        self.assertEqual(_errno(lambda: list(sd.ilistdir("/"))), errno.ENODEV)
+        self.assertEqual(len(rp.received) - n, 2)
+
+    def test_a_card_inserted_later_is_found(self):
+        rp, sd = make_sd(busy_retries=50)
+        rp.card = "none"
+        self.assertEqual(_errno(sd.stat, "/a.txt"), errno.ENODEV)
+        rp.card = "ok"
+        rp.files["/a.txt"] = bytearray(b"hello")
+        rp.busy_for = 1                       # the mount that finds the card
+        self.assertEqual(_errno(sd.stat, "/a.txt"), errno.ENODEV)
+        self.assertEqual(sd.stat("/a.txt")[6], 5)
+
     def test_a_card_busy_too_long_is_ebusy(self):
         rp, sd = make_sd(busy_retries=3)
         rp.files["/a.txt"] = bytearray(b"hello")
