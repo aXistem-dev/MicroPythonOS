@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 MAX_PAYLOAD = 4700          # largest legal InterdeviceMessage is 4666 bytes (a 4 KB file chunk)
 RX_SIZE = 2 * (4 + MAX_PAYLOAD)  # the frame being read and the start of the next
+EBUSY = getattr(errno, "EBUSY", 16)
 STALL_MS = 30               # a whole frame takes ~23 ms at 2 Mbaud: a frame still incomplete after
                             # this long with no new bytes had a false or damaged header
 
@@ -27,6 +28,16 @@ class LinkError(OSError):
 class LinkTimeout(LinkError):
     def __init__(self, what="no reply from the RP2040"):
         super().__init__(errno.ETIMEDOUT, what)
+
+
+class LinkBusy(LinkError):
+    """The link was asked for from inside a request this thread is making. MicroPython runs
+    scheduled work (LVGL's timers and events) between bytecodes of whichever thread is
+    running, so a UI callback can run in the middle of our own request: waiting for the lock
+    there would wait for this very thread."""
+
+    def __init__(self):
+        super().__init__(EBUSY, "RP2040 link busy in this thread")
 
 
 class LinkNack(LinkError):
@@ -53,6 +64,7 @@ class Link:
         self.hellos = 0              # unsolicited pings: the RP2040 (re)started
         self.on_nmea = None          # callable(sentence) for a GPS on the RP2040's serial port
         self._lock = _thread.allocate_lock()
+        self._owner = None           # thread holding the lock
         # received bytes not yet framed are self._rx[self._start:self._end]; frames are
         # decoded in place, so a 4 KB reply is copied once (its file data), not per piece
         self._rx = bytearray(RX_SIZE)
@@ -100,62 +112,78 @@ class Link:
         fails the whole batch; replies still on their way are then dropped as late ones."""
         limit = self.timeout_ms if timeout_ms is None else timeout_ms
         replies = [None] * len(msgs)
+        self._enter()
         try:
-            with self._lock:
-                pending = {}            # id -> index in msgs
-                sent = done = 0
+            pending = {}            # id -> index in msgs
+            sent = done = 0
+            t0 = time.ticks_ms()
+            while done < len(msgs):
+                while sent < len(msgs) and sent - done < window:
+                    rid = self._take_id()
+                    out = dict(msgs[sent])
+                    out["id"] = rid
+                    self.uart.write(proto.frame(proto.encode(out)))
+                    pending[rid] = sent
+                    sent += 1
+                reply = self._next_frame()
+                if reply is None:
+                    if time.ticks_diff(time.ticks_ms(), t0) > limit:
+                        raise LinkTimeout()
+                    if not self._pump():
+                        self._drop_stalled_frame()
+                        self._wait()
+                    continue
+                if "nack" in reply and (reply["id"] == 0 or reply["id"] in pending):
+                    # the RP2040 nacks a request it could not decode with id 0: it is
+                    # one of ours, and the batch cannot complete
+                    raise LinkNack()
+                i = pending.pop(reply["id"], None)
+                if i is None:
+                    self._inbox.append(reply)
+                    continue
+                replies[i] = reply
+                done += 1
                 t0 = time.ticks_ms()
-                while done < len(msgs):
-                    while sent < len(msgs) and sent - done < window:
-                        rid = self._take_id()
-                        out = dict(msgs[sent])
-                        out["id"] = rid
-                        self.uart.write(proto.frame(proto.encode(out)))
-                        pending[rid] = sent
-                        sent += 1
-                    reply = self._next_frame()
-                    if reply is None:
-                        if time.ticks_diff(time.ticks_ms(), t0) > limit:
-                            raise LinkTimeout()
-                        if not self._pump():
-                            self._drop_stalled_frame()
-                            self._wait()
-                        continue
-                    if "nack" in reply and (reply["id"] == 0 or reply["id"] in pending):
-                        # the RP2040 nacks a request it could not decode with id 0: it is
-                        # one of ours, and the batch cannot complete
-                        raise LinkNack()
-                    i = pending.pop(reply["id"], None)
-                    if i is None:
-                        self._inbox.append(reply)
-                        continue
-                    replies[i] = reply
-                    done += 1
-                    t0 = time.ticks_ms()
-                return replies
+            return replies
         finally:
+            self._leave()
             self._dispatch()
 
     def poll(self):
         """Handle frames that arrived without a request (boot hello, NMEA sentences). Call it
         now and then when nothing else uses the link; requests do the same on their way."""
+        self._enter()
         try:
-            with self._lock:
-                self._pump()
-                while True:
-                    msg = self._next_frame()
-                    if msg is None:
-                        return
-                    self._inbox.append(msg)
+            self._pump()
+            while True:
+                msg = self._next_frame()
+                if msg is None:
+                    return
+                self._inbox.append(msg)
         finally:
+            self._leave()
             self._dispatch()
 
     def send(self, msg):
         """Send a request that gets no reply (beep, tone)."""
-        with self._lock:
+        self._enter()
+        try:
             self.uart.write(proto.frame(proto.encode(msg)))
+        finally:
+            self._leave()
 
     # --- internals ------------------------------------------------------- #
+    def _enter(self):
+        me = _thread.get_ident()
+        if self._owner == me:
+            raise LinkBusy()
+        self._lock.acquire()
+        self._owner = me
+
+    def _leave(self):
+        self._owner = None
+        self._lock.release()
+
     def _take_id(self):
         rid = self._next_id
         self._next_id = rid + 1 if rid < 0x7FFFFFFF else 1

@@ -429,6 +429,34 @@ class TestLink(unittest.TestCase):
             time.sleep_ms(10)
         self.assertEqual(results, {0x44: True, 0x62: True})
 
+    def test_a_request_from_inside_a_request_on_the_same_thread_fails_fast(self):
+        # MicroPython runs scheduled work (LVGL's timers and events) between bytecodes of
+        # whichever thread is running: a UI callback that beeps or reads the card can run
+        # inside a request this thread is waiting on, and would wait for its own lock
+        from drivers.indicator_rp2040.link import LinkBusy
+        rp, uart, link = make_link()
+        nested = []
+        orig = uart.write
+
+        def write(data):
+            if not nested:
+                nested.append("ui")
+                try:
+                    link.request({"ping": 2})
+                except LinkBusy as e:
+                    nested.append(e.errno)
+                try:
+                    link.send({"beep": 1})
+                except LinkBusy:
+                    nested.append("send busy")
+            return orig(data)
+
+        uart.write = write
+        self.assertEqual(link.ping(), 2)
+        self.assertEqual(nested, ["ui", sdfs.EBUSY, "send busy"])
+        uart.write = orig
+        self.assertEqual(link.ping(), 2)
+
     def test_waiting_for_a_reply_blocks_in_the_uart_instead_of_sleeping(self):
         # a blocking read lets other threads run until the reply's first byte is in; a sleep
         # wakes up late (a 1 ms sleep takes ~5 ms on the device)
