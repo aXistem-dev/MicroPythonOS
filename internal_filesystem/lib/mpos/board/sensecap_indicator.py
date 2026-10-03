@@ -261,7 +261,7 @@ try:
         from drivers.indicator_rp2040.buzzer import RemoteBuzzer
         from drivers.indicator_rp2040.i2c import RemoteI2C
         from drivers.indicator_rp2040.sdfs import SDCard
-        from mpos import AudioManager, DeviceManager, SDCardManager
+        from mpos import AudioManager, DeviceManager, GPSManager, SDCardManager
         rp2040_link = _link
         # a tone has no end time: silence one left sounding when the ESP32 reset mid-tune
         rp2040_link.send({"tone": {"frequency_hz": 0}})
@@ -271,10 +271,12 @@ try:
         DeviceManager.registerBus(type="i2c", i2c_bus=grove_i2c)
         AudioManager.add(AudioManager.Output("Buzzer", "buzzer",
                                              buzzer_factory=lambda: RemoteBuzzer(rp2040_link)))
+        # a GPS module on the RP2040's serial port (Grove) arrives as NMEA sentences
+        GPSManager.set_nmea_source(rp2040_link)
         if __debug__: logger.debug("sensecap_indicator: RP2040 link up")
     else:
         logger.warning("sensecap_indicator: the RP2040 does not answer (no bridge firmware?): "
-                       "no SD card, Grove I2C or buzzer")
+                       "no SD card, Grove I2C, buzzer or GPS")
 except Exception as e:
     logger.error("sensecap_indicator: RP2040 link setup failed: %s", e)
 
