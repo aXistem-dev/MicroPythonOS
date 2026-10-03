@@ -287,6 +287,13 @@ class DownloadManager:
                         if __debug__: logger.debug("Downloading %s bytes in chunks of size %s", total_size, chunk_size)
 
                     # ---- read this connection until EOF or a read error ----
+                    response_start = partial_size
+                    response_length = None
+                    try:
+                        if isinstance(response.headers, dict) and response.headers.get('Content-Length'):
+                            response_length = int(response.headers.get('Content-Length'))
+                    except (TypeError, ValueError):
+                        pass
                     while True:
                         try:
                             chunk_data = await TaskManager.wait_for(
@@ -297,6 +304,15 @@ class DownloadManager:
                             # A read error (timeout / dropped connection) is recoverable:
                             # break out and resume via a Range request below.
                             logger.error("Chunk read error: %s", e)
+                            reconnect_needed = True
+                            break
+
+                        if not chunk_data and response_length is not None \
+                                and partial_size - response_start < response_length:
+                            # The server closed the connection before sending what its
+                            # Content-Length promised: resume rather than report success.
+                            logger.error("Connection closed at %s of %s bytes",
+                                         partial_size - response_start, response_length)
                             reconnect_needed = True
                             break
 
