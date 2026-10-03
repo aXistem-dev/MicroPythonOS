@@ -57,6 +57,10 @@ print(f"{sys.implementation=}")
 import os
 sys.modules["uos"] = os
 
+# Imports of built-in modules otherwise search sys.path on every call (see that module)
+from builtin_module_cache import cache_builtin_modules
+cache_builtin_modules()
+
 # These info prints don't seem to slow down the boot measurably so let's leave them in, for now:
 print("Free space on internal filesystem:")
 stat = os.statvfs("/")
