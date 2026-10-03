@@ -52,6 +52,8 @@ _TOP_BY_NUM = {n: (name, kind) for n, name, kind in _TOP}
 
 def _varint(n, out):
     n = int(n)
+    if n < 0 or n >> 64:
+        raise ValueError("varint out of range: %d" % n)
     while True:
         b = n & 0x7F
         n >>= 7
@@ -179,10 +181,35 @@ def _value(name, kind, wire, v):
     if wire != 2:
         raise ValueError("%s: expected a length-delimited field" % name)
     if kind == _S:
-        return bytes(v).decode("utf-8")
+        return _utf8(bytes(v))
     if kind == _B:
         return bytes(v)
     return _decode_message(kind, v)
+
+
+def _utf8(b):
+    # The firmware cuts long names at a byte limit, which can split a multi-byte character:
+    # decode what is valid and replace the rest instead of failing the whole message
+    try:
+        return b.decode("utf-8")
+    except UnicodeError:
+        pass
+    out = []
+    i = 0
+    n = len(b)
+    while i < n:
+        c = b[i]
+        size = 1 if c < 0x80 else 2 if 0xC2 <= c < 0xE0 else 3 if 0xE0 <= c < 0xF0 else 4 if 0xF0 <= c < 0xF5 else 0
+        if size and i + size <= n:
+            try:
+                out.append(b[i:i + size].decode("utf-8"))
+                i += size
+                continue
+            except UnicodeError:
+                pass
+        out.append("\ufffd")
+        i += 1
+    return "".join(out)
 
 
 def _decode_message(schema, buf):

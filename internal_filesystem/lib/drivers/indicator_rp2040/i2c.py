@@ -77,12 +77,14 @@ class RemoteI2C:
             raise OSError(errno.ENODEV)          # what machine.I2C raises for no device
         if status != proto.I2C_OK:
             raise OSError(errno.EIO)
-        return r["read_data"]
+        data = r["read_data"]
+        if len(data) != nbytes:
+            raise OSError(errno.EIO)             # the device stopped answering mid-read
+        return data
 
 
 def _memaddr(memaddr, addrsize):
-    if addrsize == 8:
-        return bytes((memaddr & 0xFF,))
-    if addrsize == 16:
-        return bytes(((memaddr >> 8) & 0xFF, memaddr & 0xFF))
-    raise ValueError("addrsize must be 8 or 16")
+    if addrsize <= 0 or addrsize % 8:
+        raise ValueError("addrsize must be a multiple of 8")
+    n = addrsize // 8
+    return bytes((memaddr >> (8 * (n - 1 - i))) & 0xFF for i in range(n))

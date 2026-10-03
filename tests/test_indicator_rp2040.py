@@ -27,9 +27,12 @@ class FakeRP2040:
         self.received = []                    # every decoded request
         self.drop = 0                         # swallow the next N requests
         self.nack_next = False
+        self.nack0_next = False                # nack an undecodable request (id 0)
         self.prefix = b""                     # bytes sent ahead of the next response
         self.chunked = 0                      # deliver responses N bytes at a time
         self.busy_for = 0                     # report the card busy this many more times
+        self.slow_format = 0                  # a format runs after the reply: sd_info busy N times
+        self.info_busy = 0
         self.drop_after_handling = 0          # handle the next N requests, lose the reply
 
     # requests ------------------------------------------------------------ #
@@ -41,6 +44,9 @@ class FakeRP2040:
         if self.nack_next:
             self.nack_next = False
             return {"id": msg["id"], "nack": True}
+        if self.nack0_next:
+            self.nack0_next = False
+            return {"id": 0, "nack": True}
         rid = msg["id"]
         if "ping" in msg:
             return {"id": rid, "pong": self.version}
@@ -51,7 +57,10 @@ class FakeRP2040:
         if "i2c_transaction" in msg:
             return {"id": rid, "i2c_result": self._i2c(msg["i2c_transaction"])}
         if "get_sd_info" in msg or "sd_command" in msg:
-            return {"id": rid, "sd_info": self._info()}
+            info = self._info()
+            if msg.get("sd_command") == proto.SD_FORMAT and self.slow_format:
+                self.info_busy = self.slow_format   # the reply is built before formatting starts
+            return {"id": rid, "sd_info": info}
         if "file_transfer" in msg:
             return {"id": rid, "file_transfer": self._file(msg["file_transfer"])}
         if "directory_listing" in msg:
@@ -59,6 +68,9 @@ class FakeRP2040:
         return {"id": rid, "nack": True}
 
     def _info(self):
+        if self.info_busy:
+            self.info_busy -= 1
+            return {"busy": True}
         if self.card == "none":
             return {}
         if self.card == "busy":
@@ -293,6 +305,39 @@ class TestLink(unittest.TestCase):
         with self.assertRaises(LinkNack):
             link.ping()
         self.assertTrue(time.ticks_diff(time.ticks_ms(), t0) < 1000)
+
+    def test_false_header_with_a_small_length_does_not_eat_the_reply(self):
+        rp, uart, link = make_link(timeout_ms=500)
+        rp.prefix = b"\x94\xc3\x00\x10"
+        self.assertEqual(link.ping(), 2)
+        self.assertEqual(link.ping(), 2)
+
+    def test_false_header_with_a_large_length_is_dropped_once_the_line_is_quiet(self):
+        rp, uart, link = make_link(timeout_ms=500)
+        rp.prefix = b"\x94\xc3\x10\x00"
+        self.assertEqual(link.ping(), 2)
+        self.assertEqual(link.ping(), 2)
+
+    def test_a_request_the_rp2040_cannot_decode_fails_fast(self):
+        from drivers.indicator_rp2040.link import LinkNack
+        rp, uart, link = make_link(timeout_ms=5000)
+        rp.nack0_next = True
+        t0 = time.ticks_ms()
+        with self.assertRaises(LinkNack):
+            link.ping()
+        self.assertTrue(time.ticks_diff(time.ticks_ms(), t0) < 1000)
+        self.assertEqual(link.ping(), 2)
+
+    def test_nmea_callback_runs_outside_the_link_lock(self):
+        # a callback that uses the link itself (e.g. logging sentences to the SD card) must work
+        rp, uart, link = make_link()
+        locked = []
+        link.on_nmea = lambda sentence: locked.append(link._lock.locked())
+        rp.prefix = proto.frame(proto.encode({"id": 0, "nmea": "$GPGGA,1"}))
+        link.ping()
+        uart.rx += proto.frame(proto.encode({"id": 0, "nmea": "$GPGGA,2"}))
+        link.poll()
+        self.assertEqual(locked, [False, False])
 
     def test_tone_is_sent_without_waiting_for_a_reply(self):
         rp, uart, link = make_link(timeout_ms=5000)
@@ -534,8 +579,8 @@ class TestSDWrite(unittest.TestCase):
             f.write(b"png")
         sd.remove("/tiles/12/2100/1360.png")
         self.assertFalse("/tiles/12/2100/1360.png" in rp.files)
-        self.assertEqual(_errno(sd.rename, "/a", "/b"), errno.EPERM)
-        self.assertEqual(_errno(sd.rmdir, "/tiles"), errno.EPERM)
+        self.assertEqual(_errno(sd.rename, "/a", "/b"), 95)   # EOPNOTSUPP
+        self.assertEqual(_errno(sd.rmdir, "/tiles"), 95)
         self.assertEqual(_errno(sd.open, "/nodir/x.bin", "wb"), errno.EIO)
 
     def test_format_asks_the_rp2040(self):
@@ -544,6 +589,54 @@ class TestSDWrite(unittest.TestCase):
         self.assertEqual([m["sd_command"] for m in rp.received if "sd_command" in m], [proto.SD_FORMAT])
         rp.card = "none"
         self.assertFalse(sd.format())
+
+    def test_format_waits_until_the_rp2040_has_formatted(self):
+        rp, sd = make_sd()
+        rp.slow_format = 3
+        self.assertTrue(sd.format())
+        self.assertEqual(rp.info_busy, 0)          # it asked until the card was back
+
+    def test_format_of_an_unformatted_card_is_waited_for(self):
+        rp, sd = make_sd()
+        rp.card = "busy"                            # the reply to the command says busy
+        rp.slow_format = 2
+
+        def card_back(msg, orig=rp.handle):
+            if rp.info_busy == 0 and len([m for m in rp.received if "get_sd_info" in m]) >= 2:
+                rp.card = "ok"
+            return orig(msg)
+
+        rp.handle = card_back
+        self.assertTrue(sd.format())
+
+    def test_write_after_close_is_refused(self):
+        rp, sd = make_sd()
+        f = sd.open("/x.bin", "wb")
+        f.close()
+        self.assertEqual(_errno(f.write, b"late"), errno.EBADF)
+
+    def test_unsupported_modes_are_refused(self):
+        rp, sd = make_sd()
+        self.assertEqual(_errno(sd.open, "/x.bin", "r+b"), errno.EINVAL)
+        self.assertEqual(_errno(sd.open, "/x.bin", "xb"), errno.EINVAL)
+
+    def test_too_long_a_path_is_refused_before_it_reaches_the_rp2040(self):
+        rp, sd = make_sd()
+        sent = len(rp.received)
+        self.assertEqual(_errno(sd.open, "/" + "a" * 300, "rb"), 36)   # ENAMETOOLONG
+        self.assertEqual(len(rp.received), sent)
+
+    def test_large_write_in_one_call(self):
+        rp, sd = make_sd()
+        data = bytes(range(256)) * 50                  # 12800 bytes: three full chunks and a tail
+        with sd.open("/big.bin", "wb") as f:
+            self.assertEqual(f.write(data), len(data))
+        self.assertEqual(bytes(rp.files["/big.bin"]), data)
+
+    def test_text_write_counts_characters(self):
+        rp, sd = make_sd()
+        with sd.open("/t.txt", "w") as f:
+            self.assertEqual(f.write("éé"), 2)
 
     def test_statvfs(self):
         rp, sd = make_sd()
@@ -573,6 +666,22 @@ class TestSDMounted(unittest.TestCase):
         finally:
             os.umount("/sdtest")
 
+
+    def test_json_and_print_work_on_card_files(self):
+        import json
+        import os
+        rp, sd = make_sd()
+        os.mount(sd, "/sdtest")
+        try:
+            with open("/sdtest/prefs.json", "w") as f:
+                json.dump({"a": 1, "b": [2, 3]}, f)
+            with open("/sdtest/prefs.json") as f:
+                self.assertEqual(json.load(f), {"a": 1, "b": [2, 3]})
+            with open("/sdtest/log.txt", "w") as f:
+                print("line", 1, file=f)
+            self.assertEqual(bytes(rp.files["/log.txt"]), b"line 1\n")
+        finally:
+            os.umount("/sdtest")
 
 # --- Grove I2C ----------------------------------------------------------- #
 
@@ -621,7 +730,7 @@ class TestGroveI2C(unittest.TestCase):
 
     def test_sixteen_bit_register_address(self):
         rp, i2c = make_i2c()
-        rp.devices[0x62] = bytearray(4)
+        rp.devices[0x62] = bytearray(0x40)   # the fake keys registers on the first address byte
         i2c.readfrom_mem(0x62, 0x3682, 3, addrsize=16)
         self.assertEqual(_i2c_requests(rp)[-1]["write_data"], b"\x36\x82")
 
@@ -629,6 +738,19 @@ class TestGroveI2C(unittest.TestCase):
         rp, i2c = make_i2c()
         self.assertEqual(_errno(i2c.readfrom_mem, 0x44, 0, 2), errno.ENODEV)
         self.assertEqual(_errno(i2c.writeto, 0x44, b"\x00"), errno.ENODEV)
+
+    def test_a_short_read_is_an_error(self):
+        rp, i2c = make_i2c()
+        rp.devices[0x44] = bytearray(4)                 # only 4 registers answer
+        with self.assertRaises(OSError):
+            i2c.readfrom_mem(0x44, 2, 8)
+
+    def test_any_whole_byte_address_size(self):
+        rp, i2c = make_i2c()
+        rp.devices[0x50] = bytearray(16)
+        i2c.readfrom_mem(0x50, 0x000001, 1, addrsize=24)
+        sent = _i2c_requests(rp)[-1]["write_data"]
+        self.assertEqual(bytes(sent), b"\x00\x00\x01")
 
     def test_too_long_a_read(self):
         rp, i2c = make_i2c()
@@ -683,6 +805,12 @@ class TestBuzzer(unittest.TestCase):
         b.duty_u16(1000)
         b.deinit()
         self.assertEqual(_tones(rp)[-1], (0, 0))
+
+    def test_beep_length_is_kept_in_range(self):
+        rp, bz = self.make()
+        bz.beep(100000)
+        bz.beep(-5)
+        self.assertEqual([m["beep"] for m in rp.received if "beep" in m], [65535, 0])
 
     def test_beep(self):
         rp, b = self.make()

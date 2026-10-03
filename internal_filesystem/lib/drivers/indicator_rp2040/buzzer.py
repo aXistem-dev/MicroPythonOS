@@ -37,7 +37,7 @@ class RemoteBuzzer:
 
     def beep(self, duration_ms):
         """The RP2040's own short beep (its fixed pitch)."""
-        self.link.send({"beep": int(duration_ms)})
+        self.link.send({"beep": max(0, min(int(duration_ms), 65535))})   # the firmware's 16-bit field
 
     def _tone(self, frequency):
         self.link.send({"tone": {"frequency_hz": frequency, "duration_ms": 0}})

@@ -3,6 +3,7 @@
 # cache (map tiles are read front to back); writes are buffered into 4 KB appends.
 
 import errno
+import io
 import time
 
 from . import proto
@@ -14,6 +15,10 @@ _DIR, _FILE = 0x4000, 0x8000
 # MicroPython's errno module leaves these out; the POSIX values
 EBUSY = getattr(errno, "EBUSY", 16)
 ENOTDIR = getattr(errno, "ENOTDIR", 20)
+ENAMETOOLONG = getattr(errno, "ENAMETOOLONG", 36)
+EOPNOTSUPP = getattr(errno, "EOPNOTSUPP", 95)
+
+MAX_PATH = 255              # bytes, the firmware's filepath limit (256 with the terminating NUL)
 
 _ERRNO = {
     proto.FILE_NO_CARD: errno.ENODEV,
@@ -55,12 +60,30 @@ class SDCard:
             return False
 
     def command(self, cmd):
-        """proto.SD_MOUNT / SD_EJECT / SD_FORMAT; returns the card info afterwards."""
-        return self.link.request({"sd_command": cmd}, timeout_ms=30000)["sd_info"]
+        """proto.SD_MOUNT / SD_EJECT / SD_FORMAT. The RP2040 answers at once with the card info as
+        it is at that moment; the mount or format itself happens afterwards."""
+        self._empty = False
+        return self.link.request({"sd_command": cmd})["sd_info"]
 
-    def format(self):
-        """Wipe the card and put a fresh FAT on it (the RP2040 does it). True when mounted after."""
-        return bool(self.command(proto.SD_FORMAT)["present"])
+    def format(self, timeout_ms=120000):
+        """Wipe the card and put a fresh FAT on it (the RP2040 does it). Waits for the format and
+        the mount after it; True when the fresh card is mounted."""
+        info = self.command(proto.SD_FORMAT)
+        seen_busy = info["busy"]
+        settled = 0
+        t0 = time.ticks_ms()
+        while time.ticks_diff(time.ticks_ms(), t0) < timeout_ms:
+            time.sleep_ms(self.busy_wait_ms)
+            info = self.info()
+            if info["busy"]:
+                seen_busy = True
+                continue
+            settled += 1
+            # done once the busy spell is over (or it never showed: the format was quicker
+            # than our polling)
+            if seen_busy or settled > self.busy_retries:
+                return bool(info["present"])
+        raise OSError(EBUSY)
 
     # --- VFS protocol ---------------------------------------------------- #
     def mount(self, readonly, mkfs):
@@ -117,6 +140,8 @@ class SDCard:
         return (bsize, bsize, blocks, free, free, 0, 0, 0, 0, 255)
 
     def open(self, path, mode="r"):
+        if "+" in mode or "x" in mode:
+            raise OSError(errno.EINVAL)
         f = SDFile(self, self._abs(path), mode)
         return f if "b" in mode else _TextFile(f)
 
@@ -130,10 +155,10 @@ class SDCard:
         _check(self._file(proto.DELETE, self._abs(path)))
 
     def rmdir(self, path):
-        raise OSError(errno.EPERM)       # not offered by the RP2040 firmware
+        raise OSError(EOPNOTSUPP)        # not offered by the RP2040 firmware
 
     def rename(self, old, new):
-        raise OSError(errno.EPERM)       # not offered by the RP2040 firmware
+        raise OSError(EOPNOTSUPP)        # not offered by the RP2040 firmware
 
     # --- requests -------------------------------------------------------- #
     def _abs(self, path):
@@ -150,7 +175,10 @@ class SDCard:
                     parts.pop()
                 continue
             parts.append(part)
-        return "/" + "/".join(parts)
+        path = "/" + "/".join(parts)
+        if len(path.encode("utf-8")) > MAX_PATH:
+            raise OSError(ENAMETOOLONG)
+        return path
 
     def _call(self, msg, member, retry_timeout=True):
         """Send a file or listing request; wait out a busy card, retry a lost reply once."""
@@ -199,8 +227,9 @@ def _check(r):
         raise OSError(_ERRNO.get(r["status"], errno.EIO))
 
 
-class SDFile:
-    """A binary file on the card. Modes: r, w, a (with or without b)."""
+class SDFile(io.IOBase):
+    """A binary file on the card. Modes: r, w, a (with or without b). As an io.IOBase stream it
+    also works where MicroPython needs a real stream (json.load, print(file=...))."""
 
     def __init__(self, sd, path, mode):
         self.sd = sd
@@ -235,7 +264,7 @@ class SDFile:
 
     # --- reading ----------------------------------------------------------- #
     def read(self, n=-1):
-        if self._writing:
+        if self._writing or self.closed:
             raise OSError(errno.EBADF)
         if n is None or n < 0:
             n = self._size - self._pos
@@ -256,19 +285,29 @@ class SDFile:
         buf[:len(data)] = data
         return len(data)
 
-    def readline(self):
+    def readline(self, size=-1):
+        if self._writing or self.closed:
+            raise OSError(errno.EBADF)
         parts = []
-        while True:
+        left = size if size is not None and size >= 0 else -1
+        while left:
             data = self._chunk_at(self._pos)
             if not data:
                 break
             i = data.find(b"\n")
             take = data if i < 0 else data[:i + 1]
+            if 0 <= left < len(take):
+                take, i = take[:left], -1
             parts.append(take)
             self._pos += len(take)
+            if left > 0:
+                left -= len(take)
             if i >= 0:
                 break
         return b"".join(parts)
+
+    def readlines(self):
+        return list(self)
 
     def _chunk_at(self, pos):
         """The cached bytes from `pos` on, fetching the chunk that holds `pos` if needed."""
@@ -295,12 +334,21 @@ class SDFile:
 
     # --- writing ----------------------------------------------------------- #
     def write(self, data):
-        if not self._writing:
+        if not self._writing or self.closed:
             raise OSError(errno.EBADF)
-        self._wbuf += bytes(data)
-        while len(self._wbuf) >= CHUNK:
-            self._put(self._wbuf[:CHUNK])
-            self._wbuf = self._wbuf[CHUNK:]
+        data = bytes(data)
+        i = 0
+        if self._wbuf:
+            i = min(CHUNK - len(self._wbuf), len(data))
+            self._wbuf += data[:i]
+            if len(self._wbuf) < CHUNK:
+                return len(data)
+            self._put(self._wbuf)
+            self._wbuf = b""
+        while len(data) - i >= CHUNK:
+            self._put(data[i:i + CHUNK])
+            i += CHUNK
+        self._wbuf = data[i:]
         return len(data)
 
     def flush(self):
@@ -335,6 +383,16 @@ class SDFile:
             finally:
                 self.closed = True
 
+    def ioctl(self, req, arg):
+        # the stream protocol's flush (1) and close (4); seek goes through seek()
+        if req == 1:
+            self.flush()
+            return 0
+        if req == 4:
+            self.close()
+            return 0
+        return -1
+
     def __enter__(self):
         return self
 
@@ -351,18 +409,31 @@ class SDFile:
         return line
 
 
-class _TextFile:
+class _TextFile(io.IOBase):
     """UTF-8 text on top of an SDFile."""
 
     def __init__(self, f):
         self._f = f
 
+    @property
+    def closed(self):
+        return self._f.closed
+
+    def readinto(self, buf):
+        return self._f.readinto(buf)
+
+    def ioctl(self, req, arg):
+        return self._f.ioctl(req, arg)
+
+    def readlines(self):
+        return list(self)
+
     def read(self, n=-1):
         data = self._f.read(n)
         return self._decode(data)
 
-    def readline(self):
-        return self._decode(self._f.readline())
+    def readline(self, size=-1):
+        return self._decode(self._f.readline(size))
 
     def _decode(self, data):
         # a read that stopped inside a multi-byte character takes the rest of it
@@ -377,7 +448,10 @@ class _TextFile:
         return data.decode("utf-8")
 
     def write(self, s):
-        return self._f.write(s.encode("utf-8"))
+        if isinstance(s, str):
+            self._f.write(s.encode("utf-8"))
+            return len(s)
+        return self._f.write(s)       # bytes from the stream protocol (print, json.dump)
 
     def seek(self, offset, whence=0):
         return self._f.seek(offset, whence)

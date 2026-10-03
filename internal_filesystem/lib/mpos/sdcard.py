@@ -1,3 +1,4 @@
+import errno
 import logging
 import os
 import machine
@@ -222,7 +223,7 @@ class SDCardManager:
                 if __debug__: logger.debug("  - No prior mount found for %s, proceeding with format", mount_point)
             if self._mode == 'vfs':
                 if not self._sdcard.format():
-                    raise OSError(5)
+                    raise OSError(errno.EIO)
             else:
                 vfs.VfsFat.mkfs(self._sdcard)
             if __debug__: logger.debug("SD card formatted successfully as FAT32")

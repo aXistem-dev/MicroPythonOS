@@ -4,13 +4,18 @@
 # Grove sensor) take turns on a lock, and each reply is matched to its request by id.
 
 import errno
+import logging
 import time
 
 import _thread
 
 from . import proto
 
-MAX_PAYLOAD = 8192          # largest legal frame is ~4.4 KB (a 4 KB file chunk)
+logger = logging.getLogger(__name__)
+
+MAX_PAYLOAD = 4700          # largest legal InterdeviceMessage is 4666 bytes (a 4 KB file chunk)
+STALL_MS = 30               # a whole frame takes ~23 ms at 2 Mbaud: a frame still incomplete after
+                            # this long with no new bytes had a false or damaged header
 
 
 class LinkError(OSError):
@@ -47,6 +52,8 @@ class Link:
         self._buf = b""             # received, not yet framed (bytes: MicroPython bytearrays
         self._next_id = 1           # cannot delete slices)
         self._available = False
+        self._last_rx = time.ticks_ms()
+        self._inbox = []            # unsolicited messages, handled once the lock is released
 
     # --- public ---------------------------------------------------------- #
     def connect(self, raise_errors=True):
@@ -76,37 +83,46 @@ class Link:
 
     def request(self, msg, timeout_ms=None):
         """Send `msg` (an InterdeviceMessage dict without id) and return the reply."""
-        with self._lock:
-            rid = self._take_id()
-            out = dict(msg)
-            out["id"] = rid
-            self.uart.write(proto.frame(proto.encode(out)))
-            limit = self.timeout_ms if timeout_ms is None else timeout_ms
-            t0 = time.ticks_ms()
-            while True:
-                reply = self._next_frame()
-                if reply is None:
-                    if time.ticks_diff(time.ticks_ms(), t0) > limit:
-                        raise LinkTimeout()
-                    if not self._pump():
-                        time.sleep_ms(1)
-                    continue
-                if reply["id"] == rid:
-                    if "nack" in reply:
-                        raise LinkNack()
-                    return reply
-                self._unsolicited(reply)
+        try:
+            with self._lock:
+                rid = self._take_id()
+                out = dict(msg)
+                out["id"] = rid
+                self.uart.write(proto.frame(proto.encode(out)))
+                limit = self.timeout_ms if timeout_ms is None else timeout_ms
+                t0 = time.ticks_ms()
+                while True:
+                    reply = self._next_frame()
+                    if reply is None:
+                        if time.ticks_diff(time.ticks_ms(), t0) > limit:
+                            raise LinkTimeout()
+                        if not self._pump():
+                            self._drop_stalled_frame()
+                            time.sleep_ms(1)
+                        continue
+                    if reply["id"] == rid or (reply["id"] == 0 and "nack" in reply):
+                        # the RP2040 nacks a request it could not decode with id 0; only one
+                        # request is on the wire, so it is this one
+                        if "nack" in reply:
+                            raise LinkNack()
+                        return reply
+                    self._inbox.append(reply)
+        finally:
+            self._dispatch()
 
     def poll(self):
         """Handle frames that arrived without a request (boot hello, NMEA sentences). Call it
         now and then when nothing else uses the link; requests do the same on their way."""
-        with self._lock:
-            self._pump()
-            while True:
-                msg = self._next_frame()
-                if msg is None:
-                    return
-                self._unsolicited(msg)
+        try:
+            with self._lock:
+                self._pump()
+                while True:
+                    msg = self._next_frame()
+                    if msg is None:
+                        return
+                    self._inbox.append(msg)
+        finally:
+            self._dispatch()
 
     def send(self, msg):
         """Send a request that gets no reply (beep, tone)."""
@@ -126,8 +142,15 @@ class Link:
         data = self.uart.read(n)
         if data:
             self._buf += data
+            self._last_rx = time.ticks_ms()
             return True
         return False
+
+    def _drop_stalled_frame(self):
+        buf = self._buf
+        if len(buf) >= proto.HEADER_SIZE and buf[:2] == proto.MAGIC \
+                and time.ticks_diff(time.ticks_ms(), self._last_rx) > STALL_MS:
+            self._buf = buf[1:]  # look for the next magic inside what that header claimed
 
     def _next_frame(self):
         while True:
@@ -148,20 +171,26 @@ class Link:
             end = proto.HEADER_SIZE + n
             if len(buf) < end:
                 return None
-            payload = buf[proto.HEADER_SIZE:end]
-            self._buf = buf[end:]
             try:
-                return proto.decode(payload)
+                msg = proto.decode(buf[proto.HEADER_SIZE:end])
             except ValueError:
+                self._buf = buf[1:]  # not a real frame: resync from just after its magic
                 continue
+            self._buf = buf[end:]
+            return msg
 
-    def _unsolicited(self, msg):
-        if msg["id"] == 0 and "ping" in msg:
-            self.hellos += 1        # the RP2040 announces a (re)start
-        elif "nmea" in msg:
-            if self.on_nmea is not None:
+    def _dispatch(self):
+        # Runs without the lock, so a callback may use the link itself
+        while True:
+            try:
+                msg = self._inbox.pop(0)
+            except IndexError:  # empty, or another thread took the last one
+                return
+            if msg["id"] == 0 and "ping" in msg:
+                self.hellos += 1        # the RP2040 announces a (re)start
+            elif "nmea" in msg and self.on_nmea is not None:
                 try:
                     self.on_nmea(msg["nmea"])
                 except Exception as e:
-                    print("indicator_rp2040: nmea callback error:", repr(e))
-        # late replies to requests that already timed out are dropped
+                    logger.warning("indicator_rp2040: nmea callback error: %r", e)
+            # late replies to requests that already timed out are dropped

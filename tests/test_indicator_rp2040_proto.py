@@ -74,6 +74,25 @@ class TestDecode(unittest.TestCase):
             proto.decode(bytes.fromhex("3a0a0801"))
 
 
+class TestRobustness(unittest.TestCase):
+
+    def test_negative_number_is_refused(self):
+        with self.assertRaises(ValueError):
+            proto.encode({"tone": {"frequency_hz": -5}})
+        with self.assertRaises(ValueError):
+            proto.encode({"beep": -1})
+
+    def test_a_name_cut_mid_character_still_decodes(self):
+        # directory_listing (8) with filenames (2): "ok", then "caf" + the first byte of "é"
+        listing = bytes([0x12, 2]) + b"ok" + bytes([0x12, 4]) + b"caf\xc3"
+        raw = bytes([0x42, len(listing)]) + listing + bytes([0x78, 1])
+        msg = proto.decode(raw)
+        self.assertEqual(msg["id"], 1)
+        names = msg["directory_listing"]["filenames"]
+        self.assertEqual(names[0], "ok")
+        self.assertTrue(names[1].startswith("caf"))
+
+
 class TestFrame(unittest.TestCase):
 
     def test_frame_header_is_magic_and_big_endian_length(self):
