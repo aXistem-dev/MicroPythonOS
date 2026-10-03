@@ -378,6 +378,13 @@ class TestBuzzerFactory(unittest.TestCase):
         self.assertTrue(any(c[0] == "duty_u16" and c[1] > 0 for c in calls))
         self.assertEqual(calls[-1], ("deinit",))
 
-    def test_factory_output_claims_no_pin(self):
+    def test_a_second_tune_on_the_factory_buzzer_replaces_the_first(self):
+        # like a pin buzzer: two sessions on the same buzzer conflict, so the new one wins
+        first = AudioManager.player(rtttl="t:d=8,o=5,b=900:c", output=self.output)
+        second = AudioManager.player(rtttl="t:d=8,o=5,b=900:e", output=self.output)
+        self.assertTrue(first.pin_usage())
+        self.assertTrue(AudioManager.get()._sessions_conflict(first, second))
+
+    def test_factory_output_claims_no_gpio(self):
         player = AudioManager.player(rtttl="t:d=8,o=5,b=900:c", output=self.output)
-        self.assertEqual(player.pin_usage(), {})
+        self.assertFalse(any(isinstance(k, int) for k in player.pin_usage()))

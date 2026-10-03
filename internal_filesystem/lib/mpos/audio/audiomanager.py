@@ -735,7 +735,8 @@ class Player:
             return {}
         if self.output.kind == "buzzer":
             if self.output.buzzer_pin is None:
-                return {}
+                # a buzzer behind another chip has no GPIO, but two tunes on it still conflict
+                return {("buzzer", id(self.output)): "buzzer"}
             return {self.output.buzzer_pin: "buzzer"}
         if self.output.kind == "i2s":
             return _pin_map_i2s_output(self.output.i2s_pins)
