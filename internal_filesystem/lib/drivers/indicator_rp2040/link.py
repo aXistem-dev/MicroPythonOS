@@ -15,6 +15,7 @@ from . import proto
 logger = logging.getLogger(__name__)
 
 MAX_PAYLOAD = 4700          # largest legal InterdeviceMessage is 4666 bytes (a 4 KB file chunk)
+RX_SIZE = 2 * (4 + MAX_PAYLOAD)  # the frame being read and the start of the next
 STALL_MS = 30               # a whole frame takes ~23 ms at 2 Mbaud: a frame still incomplete after
                             # this long with no new bytes had a false or damaged header
 
@@ -42,9 +43,9 @@ class LinkVersionError(LinkError):
 
 
 class Link:
-    """`uart` needs write(bytes), any() and read(n): a machine.UART, best with a read timeout
-    of about one RTOS tick (10 ms), which lets a waiting caller block in read() instead of
-    sleeping."""
+    """`uart` needs write(bytes), any() and readinto(buf): a machine.UART, best with a read
+    timeout of about one RTOS tick (10 ms), which lets a waiting caller block in readinto()
+    instead of sleeping."""
 
     def __init__(self, uart, timeout_ms=500):
         self.uart = uart
@@ -52,8 +53,12 @@ class Link:
         self.hellos = 0              # unsolicited pings: the RP2040 (re)started
         self.on_nmea = None          # callable(sentence) for a GPS on the RP2040's serial port
         self._lock = _thread.allocate_lock()
-        self._buf = b""             # received, not yet framed (bytes: MicroPython bytearrays
-        self._next_id = 1           # cannot delete slices)
+        # received bytes not yet framed are self._rx[self._start:self._end]; frames are
+        # decoded in place, so a 4 KB reply is copied once (its file data), not per piece
+        self._rx = bytearray(RX_SIZE)
+        self._mv = memoryview(self._rx)
+        self._start = self._end = 0
+        self._next_id = 1
         self._available = False
         self._last_rx = time.ticks_ms()
         self._inbox = []            # unsolicited messages, handled once the lock is released
@@ -156,60 +161,65 @@ class Link:
         self._next_id = rid + 1 if rid < 0x7FFFFFFF else 1
         return rid
 
-    def _pump(self):
-        n = self.uart.any()
-        if not n:
-            return False
-        data = self.uart.read(n)
-        if data:
-            self._buf += data
+    def _room(self):
+        """Free space after the buffered bytes, moving them to the front first."""
+        start, end = self._start, self._end
+        if start:
+            self._rx[0:end - start] = self._mv[start:end]
+            self._start, self._end = 0, end - start
+        return RX_SIZE - self._end
+
+    def _fill(self, n):
+        got = self.uart.readinto(self._mv[self._end:self._end + n]) if n else 0
+        if got:
+            self._end += got
             self._last_rx = time.ticks_ms()
             return True
         return False
 
+    def _pump(self):
+        n = self.uart.any()
+        return bool(n) and self._fill(min(n, self._room()))
+
     def _wait(self):
-        # A UART opened with a read timeout blocks in read() with the GIL released, so other
-        # threads run until the first byte is in and we wake at once; one without returns
+        # A UART opened with a read timeout blocks in readinto() with the GIL released, so
+        # other threads run until the first byte is in and we wake at once; one without returns
         # empty-handed at once, and a short sleep keeps the loop from spinning
         t = time.ticks_ms()
-        data = self.uart.read(1)
-        if data:
-            self._buf += data
-            self._last_rx = time.ticks_ms()
-        elif time.ticks_diff(time.ticks_ms(), t) < 1:
+        if not self._fill(min(1, self._room())) and time.ticks_diff(time.ticks_ms(), t) < 1:
             time.sleep_ms(1)
 
     def _drop_stalled_frame(self):
-        buf = self._buf
-        if len(buf) >= proto.HEADER_SIZE and buf[:2] == proto.MAGIC \
+        rx, start = self._rx, self._start
+        if self._end - start >= proto.HEADER_SIZE and rx[start] == 0x94 and rx[start + 1] == 0xC3 \
                 and time.ticks_diff(time.ticks_ms(), self._last_rx) > STALL_MS:
-            self._buf = buf[1:]  # look for the next magic inside what that header claimed
+            self._start = start + 1  # look for the next magic inside what that header claimed
 
     def _next_frame(self):
+        rx = self._rx
         while True:
-            buf = self._buf
-            i = buf.find(proto.MAGIC)
+            start, end = self._start, self._end
+            i = rx.find(proto.MAGIC, start, end)
             if i < 0:
                 # keep a trailing first magic byte: its partner may be on its way
-                self._buf = buf[-1:] if buf and buf[-1] == proto.MAGIC[0] else b""
+                self._start = end - 1 if end > start and rx[end - 1] == 0x94 else end
                 return None
-            if i:
-                buf = self._buf = buf[i:]
-            if len(buf) < proto.HEADER_SIZE:
+            start = self._start = i
+            if end - start < proto.HEADER_SIZE:
                 return None
-            n = (buf[2] << 8) | buf[3]
+            n = (rx[start + 2] << 8) | rx[start + 3]
             if n > MAX_PAYLOAD:
-                self._buf = buf[1:]    # not a real header: look for the next magic
+                self._start = start + 1    # not a real header: look for the next magic
                 continue
-            end = proto.HEADER_SIZE + n
-            if len(buf) < end:
+            stop = start + proto.HEADER_SIZE + n
+            if end < stop:
                 return None
             try:
-                msg = proto.decode(buf[proto.HEADER_SIZE:end])
+                msg = proto.decode(self._mv[start + proto.HEADER_SIZE:stop])
             except ValueError:
-                self._buf = buf[1:]  # not a real frame: resync from just after its magic
+                self._start = start + 1  # not a real frame: resync from just after its magic
                 continue
-            self._buf = buf[end:]
+            self._start = stop
             return msg
 
     def _dispatch(self):

@@ -159,7 +159,7 @@ def encode(msg):
 
 # --- decode -------------------------------------------------------------- #
 
-def _defaults(schema):
+def _template(schema):
     d = {}
     for _, name, kind in _SCHEMAS[schema]:
         if kind == _V:
@@ -169,7 +169,22 @@ def _defaults(schema):
         elif kind == _S:
             d[name] = ""
         else:
-            d[name] = []
+            d[name] = None          # a list, made fresh per message
+    return d
+
+
+# built once: decoding a 4 KB file chunk is on the SD card's hot path
+_TEMPLATES = {schema: _template(schema) for schema in _SCHEMAS}
+_LISTS = {schema: [name for _, name, kind in fields if kind == _RS]
+          for schema, fields in _SCHEMAS.items()}
+_BY_NUM = {schema: {n: (name, kind) for n, name, kind in fields}
+           for schema, fields in _SCHEMAS.items()}
+
+
+def _defaults(schema):
+    d = dict(_TEMPLATES[schema])
+    for name in _LISTS[schema]:
+        d[name] = []
     return d
 
 
@@ -214,7 +229,7 @@ def _utf8(b):
 
 def _decode_message(schema, buf):
     d = _defaults(schema)
-    by_num = {n: (name, kind) for n, name, kind in _SCHEMAS[schema]}
+    by_num = _BY_NUM[schema]
     for num, wire, v in _fields(buf):
         f = by_num.get(num)
         if f is None:

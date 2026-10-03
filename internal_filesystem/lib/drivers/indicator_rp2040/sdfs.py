@@ -252,8 +252,7 @@ class SDFile(io.IOBase):
         self.path = path
         self.closed = False
         self._pos = 0
-        self._cache_off = 0
-        self._cache = b""
+        self._chunks = []                # [(offset, data)]: the chunks fetched last
         self._wbuf = b""
         if "w" in mode or "a" in mode:
             self._writing = True
@@ -276,7 +275,7 @@ class SDFile(io.IOBase):
                 raise OSError(errno.EISDIR)
             _check(r)
             self._size = r["file_size"]
-            self._cache = r["filedata"]
+            self._chunks = [(0, r["filedata"])]
 
     # --- reading ----------------------------------------------------------- #
     def read(self, n=-1):
@@ -287,14 +286,15 @@ class SDFile(io.IOBase):
         n = max(0, min(n, self._size - self._pos))
         parts = []
         while n:
-            data = self._chunk_at(self._pos, n)
+            data, i = self._chunk_at(self._pos, n)
             if not data:
                 break
-            take = data[:n]
+            # a whole chunk goes out as it came in: no copy before the final join
+            take = data if i == 0 and len(data) <= n else data[i:i + n]
             parts.append(take)
             self._pos += len(take)
             n -= len(take)
-        return b"".join(parts)
+        return parts[0] if len(parts) == 1 else b"".join(parts)
 
     def readinto(self, buf):
         data = self.read(len(buf))
@@ -307,18 +307,19 @@ class SDFile(io.IOBase):
         parts = []
         left = size if size is not None and size >= 0 else -1
         while left:
-            data = self._chunk_at(self._pos)
+            data, k = self._chunk_at(self._pos)
             if not data:
                 break
-            i = data.find(b"\n")
-            take = data if i < 0 else data[:i + 1]
-            if 0 <= left < len(take):
-                take, i = take[:left], -1
+            j = data.find(b"\n", k)
+            stop = len(data) if j < 0 else j + 1
+            if 0 <= left < stop - k:
+                stop, j = k + left, -1
+            take = data[k:stop]
             parts.append(take)
             self._pos += len(take)
             if left > 0:
                 left -= len(take)
-            if i >= 0:
+            if j >= 0:
                 break
         return b"".join(parts)
 
@@ -326,28 +327,30 @@ class SDFile(io.IOBase):
         return list(self)
 
     def _chunk_at(self, pos, want=CHUNK):
-        """The cached bytes from `pos` on. When `pos` is not cached, fetch the chunks that hold
-        the next `want` bytes (at most READ_AHEAD of them)."""
+        """(chunk, index of `pos` in it) from the chunks fetched last; when `pos` is not among
+        them, fetch the chunks that hold the next `want` bytes (at most READ_AHEAD of them).
+        (b"", 0) at the end of the file."""
         if pos >= self._size:
-            return b""
-        end = self._cache_off + len(self._cache)
-        if not (self._cache_off <= pos < end):
-            want = max(1, min(want, self._size - pos, READ_AHEAD * CHUNK))
-            offsets = list(range(pos, pos + want, CHUNK))
-            if len(offsets) > 1:
-                rs = self.sd._get_many(self.path, offsets)
-            else:
-                rs = [self.sd._get(self.path, pos, CHUNK)]
-            parts = []
-            for r in rs:
-                _check(r)
-                parts.append(r["filedata"])
-                if len(r["filedata"]) < CHUNK:      # the end of the file
-                    break
-            self._cache_off, self._cache = pos, b"".join(parts)
-            if not self._cache:
-                return b""
-        return self._cache[pos - self._cache_off:]
+            return b"", 0
+        for off, data in self._chunks:
+            if off <= pos < off + len(data):
+                return data, pos - off
+        want = max(1, min(want, self._size - pos, READ_AHEAD * CHUNK))
+        offsets = list(range(pos, pos + want, CHUNK))
+        if len(offsets) > 1:
+            rs = self.sd._get_many(self.path, offsets)
+        else:
+            rs = [self.sd._get(self.path, pos, CHUNK)]
+        chunks = []
+        for off, r in zip(offsets, rs):
+            _check(r)
+            data = r["filedata"]
+            if data:
+                chunks.append((off, data))
+            if len(data) < CHUNK:           # the end of the file
+                break
+        self._chunks = chunks
+        return chunks[0][1] if chunks else b"", 0
 
     def seek(self, offset, whence=0):
         if self._writing:

@@ -223,6 +223,13 @@ class FakeUART:
         self.log.append("r")
         return out
 
+    def readinto(self, buf):
+        data = self.read(len(buf))
+        if not data:
+            return None
+        buf[:len(data)] = data
+        return len(data)
+
 
 class BlockingUART(FakeUART):
     """A UART opened with a read timeout: replies only come in while the reader waits in
@@ -242,6 +249,11 @@ class BlockingUART(FakeUART):
         if not self.rx and self.later:
             self.rx, self.later = self.later, b""
         return super().read(n)
+
+    def readinto(self, buf):
+        if not self.rx and self.later:
+            self.rx, self.later = self.later, b""
+        return super().readinto(buf)
 
 
 def make_link(uart_class=FakeUART, **kw):
@@ -301,6 +313,12 @@ class TestLink(unittest.TestCase):
     def test_garbage_and_oversized_header_are_resynced(self):
         rp, uart, link = make_link()
         rp.prefix = b"\x00\xff\x94\x94\xc3\xff\xff junk"
+        self.assertEqual(link.ping(), 2)
+
+    def test_more_garbage_than_the_receive_buffer_holds_is_skipped(self):
+        rp, uart, link = make_link()
+        rp.prefix = bytes(range(0x90)) * 200          # ~29 KB, no magic in it
+        self.assertEqual(link.ping(), 2)
         self.assertEqual(link.ping(), 2)
 
     def test_reply_arriving_in_small_pieces(self):
@@ -609,6 +627,16 @@ class TestSDRead(unittest.TestCase):
         self.sd.link.timeout_ms = 40
         with self.sd.open("/tiles/12/a.png", "rb") as f:
             self.assertEqual(f.read(), self.DATA)
+
+    def test_lines_across_chunk_boundaries(self):
+        lines = [(b"line %d " % i) + b"x" * (i * 37 % 300) + b"\n" for i in range(120)]
+        self.rp.files["/log.txt"] = bytearray(b"".join(lines))
+        with self.sd.open("/log.txt", "rb") as f:
+            self.assertEqual([f.readline() for _ in lines], lines)
+            self.assertEqual(f.readline(), b"")
+        with self.sd.open("/log.txt", "rb") as f:
+            f.seek(4090)
+            self.assertEqual(f.readline(5), b"".join(lines)[4090:4095])
 
     def test_a_whole_file_read_asks_for_its_chunks_together(self):
         uart = self.sd.link.uart
