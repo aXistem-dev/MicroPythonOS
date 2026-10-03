@@ -187,10 +187,12 @@ class FakeUART:
         self.rp = rp
         self.rx = b""
         self.tx = []
+        self.log = []                         # "w" per write, "r" per read that returned bytes
         self._inbuf = b""
 
     def write(self, data):
         self.tx.append(bytes(data))
+        self.log.append("w")
         self._inbuf += bytes(data)
         while len(self._inbuf) >= 4:
             n = (self._inbuf[2] << 8) | self._inbuf[3]
@@ -218,14 +220,40 @@ class FakeUART:
         k = self.any() if n is None or n < 0 else min(n, self.any())
         out = self.rx[:k]
         self.rx = self.rx[k:]
+        self.log.append("r")
         return out
 
 
-def make_link(**kw):
+class BlockingUART(FakeUART):
+    """A UART opened with a read timeout: replies only come in while the reader waits in
+    read(), as they do when the RP2040 needs a moment to answer."""
+
+    def __init__(self, rp):
+        super().__init__(rp)
+        self.later = b""
+
+    def write(self, data):
+        n = super().write(data)
+        self.later += self.rx
+        self.rx = b""
+        return n
+
+    def read(self, n=-1):
+        if not self.rx and self.later:
+            self.rx, self.later = self.later, b""
+        return super().read(n)
+
+
+def make_link(uart_class=FakeUART, **kw):
     from drivers.indicator_rp2040.link import Link
     rp = FakeRP2040()
-    uart = FakeUART(rp)
+    uart = uart_class(rp)
     return rp, uart, Link(uart, **kw)
+
+
+def _get(path, offset):
+    return {"file_transfer": {"operation": proto.GET, "filepath": path, "offset": offset,
+                              "length": 4096}}
 
 
 # --- link ---------------------------------------------------------------- #
@@ -383,6 +411,70 @@ class TestLink(unittest.TestCase):
             time.sleep_ms(10)
         self.assertEqual(results, {0x44: True, 0x62: True})
 
+    def test_waiting_for_a_reply_blocks_in_the_uart_instead_of_sleeping(self):
+        # a blocking read lets other threads run until the reply's first byte is in; a sleep
+        # wakes up late (a 1 ms sleep takes ~5 ms on the device)
+        from drivers.indicator_rp2040 import link as link_module
+        rp, uart, link = make_link(BlockingUART)
+        sleeps = []
+
+        class Clock:
+            ticks_ms = time.ticks_ms
+            ticks_diff = time.ticks_diff
+            ticks_add = time.ticks_add
+
+            def sleep_ms(ms):
+                sleeps.append(ms)
+                time.sleep_ms(ms)
+
+        link_module.time = Clock
+        try:
+            self.assertEqual(link.ping(), 2)
+        finally:
+            link_module.time = time
+        self.assertEqual(sleeps, [])
+
+
+class TestLinkPipeline(unittest.TestCase):
+
+    def setUp(self):
+        self.rp, self.uart, self.link = make_link()
+        self.data = bytes(range(256)) * 80              # 20480 bytes: five chunks
+        self.rp.files["/f"] = bytearray(self.data)
+
+    def test_replies_come_back_in_request_order(self):
+        msgs = [_get("/f", off) for off in (0, 4096, 8192, 12288, 16384)]
+        replies = self.link.request_many(msgs)
+        self.assertEqual(b"".join(r["file_transfer"]["filedata"] for r in replies), self.data)
+
+    def test_several_requests_are_on_the_wire_before_the_first_reply_is_read(self):
+        msgs = [_get("/f", off) for off in (0, 4096, 8192, 12288, 16384)]
+        self.link.request_many(msgs, window=3)
+        first_read = self.uart.log.index("r")
+        self.assertEqual(self.uart.log[:first_read], ["w", "w", "w"])
+        self.assertEqual(self.uart.log.count("w"), 5)
+
+    def test_unsolicited_frames_between_replies_are_still_handled(self):
+        self.rp.prefix = proto.frame(proto.encode({"id": 0, "ping": 2}))
+        replies = self.link.request_many([_get("/f", 0), _get("/f", 4096)])
+        self.assertEqual(len(replies), 2)
+        self.assertEqual(self.link.hellos, 1)
+
+    def test_a_lost_reply_times_out_and_the_link_recovers(self):
+        from drivers.indicator_rp2040.link import LinkTimeout
+        self.link.timeout_ms = 40
+        self.rp.drop = 1
+        with self.assertRaises(LinkTimeout):
+            self.link.request_many([_get("/f", 0), _get("/f", 4096)])
+        self.assertEqual(self.link.ping(), 2)
+
+    def test_a_nack_fails_the_batch(self):
+        from drivers.indicator_rp2040.link import LinkNack
+        self.rp.nack_next = True
+        with self.assertRaises(LinkNack):
+            self.link.request_many([_get("/f", 0), _get("/f", 4096)])
+        self.assertEqual(self.link.ping(), 2)
+
 
 # --- SD card as a filesystem ------------------------------------------- #
 
@@ -517,6 +609,37 @@ class TestSDRead(unittest.TestCase):
         self.sd.link.timeout_ms = 40
         with self.sd.open("/tiles/12/a.png", "rb") as f:
             self.assertEqual(f.read(), self.DATA)
+
+    def test_a_whole_file_read_asks_for_its_chunks_together(self):
+        uart = self.sd.link.uart
+        with self.sd.open("/tiles/12/a.png", "rb") as f:
+            uart.log.clear()
+            self.assertEqual(f.read(), self.DATA)
+        # chunks two and three: both requests go out before the first reply is read
+        self.assertEqual(uart.log[:2], ["w", "w"])
+
+    def test_a_short_read_asks_only_for_the_chunk_it_needs(self):
+        with self.sd.open("/tiles/12/a.png", "rb") as f:
+            n = len(self.rp.received)
+            self.assertEqual(f.read(5000)[-904:], self.DATA[4096:5000])
+            self.assertEqual(len(self.rp.received) - n, 1)
+
+    def test_a_reply_lost_during_a_whole_file_read_is_retried(self):
+        self.sd.link.timeout_ms = 40
+        with self.sd.open("/tiles/12/a.png", "rb") as f:
+            self.rp.drop = 1
+            self.assertEqual(f.read(), self.DATA)
+
+    def test_a_card_busy_during_a_whole_file_read_is_waited_for(self):
+        with self.sd.open("/tiles/12/a.png", "rb") as f:
+            self.rp.busy_for = 2
+            self.assertEqual(f.read(), self.DATA)
+
+    def test_a_big_file_is_read_whole_in_windows(self):
+        big = bytes(range(251)) * 400            # 100400 bytes
+        self.rp.files["/big.bin"] = bytearray(big)
+        with self.sd.open("/big.bin", "rb") as f:
+            self.assertEqual(f.read(), big)
 
 
 class TestSDList(unittest.TestCase):

@@ -1,7 +1,8 @@
 # Request/response link to the SenseCAP Indicator's RP2040 over the inter-board UART
-# (interdevice.proto frames, see proto.py). One request is on the wire at a time: callers on
-# different threads (the UI reading files, the audio thread playing a tune, an app talking to a
-# Grove sensor) take turns on a lock, and each reply is matched to its request by id.
+# (interdevice.proto frames, see proto.py). Callers on different threads (the UI reading files,
+# the audio thread playing a tune, an app talking to a Grove sensor) take turns on a lock; a
+# caller may keep a few requests on the wire (request_many), and each reply is matched to its
+# request by id.
 
 import errno
 import logging
@@ -41,7 +42,9 @@ class LinkVersionError(LinkError):
 
 
 class Link:
-    """`uart` needs write(bytes), any() and read(n) (machine.UART with timeout=0)."""
+    """`uart` needs write(bytes), any() and read(n): a machine.UART, best with a read timeout
+    of about one RTOS tick (10 ms), which lets a waiting caller block in read() instead of
+    sleeping."""
 
     def __init__(self, uart, timeout_ms=500):
         self.uart = uart
@@ -83,30 +86,48 @@ class Link:
 
     def request(self, msg, timeout_ms=None):
         """Send `msg` (an InterdeviceMessage dict without id) and return the reply."""
+        return self.request_many((msg,), 1, timeout_ms)[0]
+
+    def request_many(self, msgs, window=3, timeout_ms=None):
+        """Send several requests, keeping up to `window` of them on the wire, and return their
+        replies in order. The RP2040 answers one request after the other, so the next one is
+        already in its buffer when it finishes the last. A nack or a reply that does not come
+        fails the whole batch; replies still on their way are then dropped as late ones."""
+        limit = self.timeout_ms if timeout_ms is None else timeout_ms
+        replies = [None] * len(msgs)
         try:
             with self._lock:
-                rid = self._take_id()
-                out = dict(msg)
-                out["id"] = rid
-                self.uart.write(proto.frame(proto.encode(out)))
-                limit = self.timeout_ms if timeout_ms is None else timeout_ms
+                pending = {}            # id -> index in msgs
+                sent = done = 0
                 t0 = time.ticks_ms()
-                while True:
+                while done < len(msgs):
+                    while sent < len(msgs) and sent - done < window:
+                        rid = self._take_id()
+                        out = dict(msgs[sent])
+                        out["id"] = rid
+                        self.uart.write(proto.frame(proto.encode(out)))
+                        pending[rid] = sent
+                        sent += 1
                     reply = self._next_frame()
                     if reply is None:
                         if time.ticks_diff(time.ticks_ms(), t0) > limit:
                             raise LinkTimeout()
                         if not self._pump():
                             self._drop_stalled_frame()
-                            time.sleep_ms(1)
+                            self._wait()
                         continue
-                    if reply["id"] == rid or (reply["id"] == 0 and "nack" in reply):
-                        # the RP2040 nacks a request it could not decode with id 0; only one
-                        # request is on the wire, so it is this one
-                        if "nack" in reply:
-                            raise LinkNack()
-                        return reply
-                    self._inbox.append(reply)
+                    if "nack" in reply and (reply["id"] == 0 or reply["id"] in pending):
+                        # the RP2040 nacks a request it could not decode with id 0: it is
+                        # one of ours, and the batch cannot complete
+                        raise LinkNack()
+                    i = pending.pop(reply["id"], None)
+                    if i is None:
+                        self._inbox.append(reply)
+                        continue
+                    replies[i] = reply
+                    done += 1
+                    t0 = time.ticks_ms()
+                return replies
         finally:
             self._dispatch()
 
@@ -145,6 +166,18 @@ class Link:
             self._last_rx = time.ticks_ms()
             return True
         return False
+
+    def _wait(self):
+        # A UART opened with a read timeout blocks in read() with the GIL released, so other
+        # threads run until the first byte is in and we wake at once; one without returns
+        # empty-handed at once, and a short sleep keeps the loop from spinning
+        t = time.ticks_ms()
+        data = self.uart.read(1)
+        if data:
+            self._buf += data
+            self._last_rx = time.ticks_ms()
+        elif time.ticks_diff(time.ticks_ms(), t) < 1:
+            time.sleep_ms(1)
 
     def _drop_stalled_frame(self):
         buf = self._buf

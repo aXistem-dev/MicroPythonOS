@@ -250,7 +250,7 @@ grove_i2c = None
 try:
     from drivers.indicator_rp2040.link import Link
     _rp_uart = machine.UART(RP2040_UART[0], baudrate=2_000_000, tx=RP2040_UART[1], rx=RP2040_UART[2],
-                            rxbuf=16384, timeout=0)
+                            rxbuf=16384, timeout=10)
     _link = Link(_rp_uart, timeout_ms=500)
     _ok = False
     for _attempt in range(2):        # the RP2040 may be finishing its own boot

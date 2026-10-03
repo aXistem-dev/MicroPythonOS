@@ -1,15 +1,17 @@
 # The SD card in the RP2040's slot as a MicroPython VFS: os.mount(SDCard(link), "/sd") and the
-# usual open()/os.listdir()/os.stat() work on it. Reads are ranged 4 KB GETs with a one-chunk
-# cache (map tiles are read front to back); writes are buffered into 4 KB appends.
+# usual open()/os.listdir()/os.stat() work on it. Reads are ranged 4 KB GETs: a read that spans
+# several chunks asks for them together (up to READ_AHEAD at once) and caches what came back;
+# writes are buffered into 4 KB appends.
 
 import errno
 import io
 import time
 
 from . import proto
-from .link import LinkTimeout
+from .link import LinkError, LinkTimeout
 
 CHUNK = 4096
+READ_AHEAD = 8              # chunks one read may fetch at once (32 KB)
 _DIR, _FILE = 0x4000, 0x8000
 
 # MicroPython's errno module leaves these out; the POSIX values
@@ -211,6 +213,20 @@ class SDCard:
     def _get(self, path, offset, length):
         return self._file(proto.GET, path, offset=offset, length=length)
 
+    def _get_many(self, path, offsets):
+        """Chunks of one file, asked for together. A busy card, a lost reply or a refusal
+        sends them again the careful way: one at a time, with the busy waits and a retry."""
+        msgs = [{"file_transfer": {"operation": proto.GET, "filepath": path, "offset": off,
+                                   "length": CHUNK}} for off in offsets]
+        try:
+            rs = [r["file_transfer"] for r in self.link.request_many(msgs)]
+        except LinkError:
+            rs = None
+        if rs is None or any(r["status"] == proto.FILE_BUSY for r in rs):
+            return [self._get(path, off, CHUNK) for off in offsets]
+        self._empty = rs[-1]["status"] == proto.FILE_NO_CARD
+        return rs
+
     def _ready_info(self):
         for _ in range(self.busy_retries + 1):
             info = self.info()
@@ -271,7 +287,7 @@ class SDFile(io.IOBase):
         n = max(0, min(n, self._size - self._pos))
         parts = []
         while n:
-            data = self._chunk_at(self._pos)
+            data = self._chunk_at(self._pos, n)
             if not data:
                 break
             take = data[:n]
@@ -309,15 +325,26 @@ class SDFile(io.IOBase):
     def readlines(self):
         return list(self)
 
-    def _chunk_at(self, pos):
-        """The cached bytes from `pos` on, fetching the chunk that holds `pos` if needed."""
+    def _chunk_at(self, pos, want=CHUNK):
+        """The cached bytes from `pos` on. When `pos` is not cached, fetch the chunks that hold
+        the next `want` bytes (at most READ_AHEAD of them)."""
         if pos >= self._size:
             return b""
         end = self._cache_off + len(self._cache)
         if not (self._cache_off <= pos < end):
-            r = self.sd._get(self.path, pos, CHUNK)
-            _check(r)
-            self._cache_off, self._cache = pos, r["filedata"]
+            want = max(1, min(want, self._size - pos, READ_AHEAD * CHUNK))
+            offsets = list(range(pos, pos + want, CHUNK))
+            if len(offsets) > 1:
+                rs = self.sd._get_many(self.path, offsets)
+            else:
+                rs = [self.sd._get(self.path, pos, CHUNK)]
+            parts = []
+            for r in rs:
+                _check(r)
+                parts.append(r["filedata"])
+                if len(r["filedata"]) < CHUNK:      # the end of the file
+                    break
+            self._cache_off, self._cache = pos, b"".join(parts)
             if not self._cache:
                 return b""
         return self._cache[pos - self._cache_off:]
