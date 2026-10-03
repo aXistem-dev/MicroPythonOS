@@ -263,6 +263,8 @@ try:
         from drivers.indicator_rp2040.sdfs import SDCard
         from mpos import AudioManager, DeviceManager, SDCardManager
         rp2040_link = _link
+        # a tone has no end time: silence one left sounding when the ESP32 reset mid-tune
+        rp2040_link.send({"tone": {"frequency_hz": 0}})
         SDCardManager.init(vfs=SDCard(rp2040_link))
         SDCardManager.mount()        # mounted with or without a card: the RP2040 notices insertion
         grove_i2c = RemoteI2C(rp2040_link)
