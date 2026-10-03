@@ -11,8 +11,8 @@ Seeed SenseCAP Indicator (D1, D1S, D1L, D1Pro).
 * PCA9535 IO expander at 0x20 (fallback 0x39), /INT on GPIO42
 * SX1262 LoRa (D1L/D1Pro): SPI GPIO41/48/47, NSS/RST/BUSY/DIO1 on expander P0.0-P0.3,
   TCXO strap on expander pin 11 (high: TCXO on DIO3 at 2.4 V; low: crystal)
-* RP2040 co-processor (SD card, buzzer, Grove, sensors on D1S/D1Pro) on UART TX19/RX20,
-  reset on expander pin 8
+* RP2040 co-processor (SD card, buzzer, Grove I2C, sensors on D1S/D1Pro) on UART TX19/RX20,
+  reset on expander pin 8; spoken to with interdevice.proto (drivers/indicator_rp2040)
 
 Sources: Seeed-Solution/SenseCAP_Indicator_ESP32 (bsp/src/boards/sensecap_indicator_board.c,
 lcd_panel_config.c, lora/bsp_sx126x.h) and the ESPHome "SEEED-INDICATOR-D1" panel model.
@@ -241,5 +241,39 @@ try:
     SensorManager.init(None)
 except Exception as e:
     logger.error("sensecap_indicator: sensor init failed: %s", e)
+
+# 7) RP2040 co-processor: SD card, Grove I2C port and buzzer, over UART2 at 2 Mbaud. Needs the
+#    indicator_rp2040 peripheral-bridge firmware (with buzzer tones) on the RP2040; with
+#    Seeed's stock firmware it does not answer and none of the three is offered.
+rp2040_link = None
+grove_i2c = None
+try:
+    from drivers.indicator_rp2040.link import Link
+    _rp_uart = machine.UART(RP2040_UART[0], baudrate=2_000_000, tx=RP2040_UART[1], rx=RP2040_UART[2],
+                            rxbuf=16384, timeout=0)
+    _link = Link(_rp_uart, timeout_ms=500)
+    _ok = False
+    for _attempt in range(2):        # the RP2040 may be finishing its own boot
+        if _link.connect(raise_errors=False):
+            _ok = True
+            break
+    if _ok:
+        from drivers.indicator_rp2040.buzzer import RemoteBuzzer
+        from drivers.indicator_rp2040.i2c import RemoteI2C
+        from drivers.indicator_rp2040.sdfs import SDCard
+        from mpos import AudioManager, DeviceManager, SDCardManager
+        rp2040_link = _link
+        SDCardManager.init(vfs=SDCard(rp2040_link))
+        SDCardManager.mount()        # mounted with or without a card: the RP2040 notices insertion
+        grove_i2c = RemoteI2C(rp2040_link)
+        DeviceManager.registerBus(type="i2c", i2c_bus=grove_i2c)
+        AudioManager.add(AudioManager.Output("Buzzer", "buzzer",
+                                             buzzer_factory=lambda: RemoteBuzzer(rp2040_link)))
+        if __debug__: logger.debug("sensecap_indicator: RP2040 link up")
+    else:
+        logger.warning("sensecap_indicator: the RP2040 does not answer (no bridge firmware?): "
+                       "no SD card, Grove I2C or buzzer")
+except Exception as e:
+    logger.error("sensecap_indicator: RP2040 link setup failed: %s", e)
 
 if __debug__: logger.debug("sensecap_indicator.py finished")
