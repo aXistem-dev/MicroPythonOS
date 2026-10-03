@@ -157,20 +157,19 @@ class PolledSX126x:
         self._radio._clear_errors()
         self._radio.prepare_send(data)
         self._radio.start_send()
-        ms = max(100, (self._radio.get_time_on_air_us(len(data)) // 1000) + 120)
-        time.sleep_ms(ms)
-        flags = self._radio._get_irq()
-        if flags & _TX_DONE:
-            self._radio.poll_send()
-            return len(data), 0
-        t0 = time.ticks_ms()
-        deadline = time.ticks_add(t0, 2000)
+        # Sleep through most of the airtime, then poll TX_DONE closely: the caller switches
+        # back to receive right after this returns, and a node that answers at once (a
+        # repeater forwarding a direct packet) starts its preamble a few ms after ours ends.
+        airtime = self._radio.get_time_on_air_us(len(data)) // 1000
+        if airtime > 10:
+            time.sleep_ms(airtime - 5)
+        deadline = time.ticks_add(time.ticks_ms(), 2000 + airtime)
         while time.ticks_diff(time.ticks_ms(), deadline) < 0:
             flags = self._radio._get_irq()
             if flags & _TX_DONE:
                 self._radio.poll_send()
                 return len(data), 0
-            time.sleep_ms(20)
+            time.sleep_ms(2)
         return 0, -5
 
     def recv(self, len_=0):
