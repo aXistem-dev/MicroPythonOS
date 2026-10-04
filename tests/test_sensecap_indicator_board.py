@@ -55,6 +55,9 @@ class FakePin:
 
     __call__ = value
 
+    def irq(self, handler=None, trigger=None):
+        self.irq_handler, self.irq_trigger = handler, trigger
+
 
 class FakePWM:
     def __init__(self, pin, freq=0, duty_u16=0):
@@ -64,6 +67,110 @@ class FakePWM:
         if value is None:
             return self.duty
         self.duty = value
+
+
+class FakeSPIBus:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+class FakeSPIDevice:
+    MSB = 0
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+class FakeSX1262:
+    last = None
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        FakeSX1262.last = self
+
+
+class FakePolled:
+    def __init__(self, radio):
+        self.radio = radio
+
+
+class FakeSPIAdapter:
+    def __init__(self, device):
+        self.device = device
+
+
+class FakeLoRaManager:
+    radioChip = None
+    board_reset = None
+    _dio2_rf_sw = False
+    _tcxo_mv = None
+    _tcxo_start_us = None
+
+
+class FakeUART:
+    last = None
+
+    def __init__(self, uart_id, **kwargs):
+        self.uart_id = uart_id
+        self.kwargs = kwargs
+        FakeUART.last = self
+
+
+class FakeLink:
+    answers = []
+    last = None
+
+    def __init__(self, uart, timeout_ms=None):
+        self.uart = uart
+        self.timeout_ms = timeout_ms
+        self.connects = 0
+        self.sent = []
+        FakeLink.last = self
+
+    def send(self, msg):
+        self.sent.append(msg)
+
+    def connect(self, raise_errors=True):
+        self.connects += 1
+        return FakeLink.answers.pop(0) if FakeLink.answers else False
+
+
+class FakeRemote:
+    def __init__(self, link):
+        self.link = link
+
+
+class FakeAudioManager:
+    outputs = []
+
+    class Output:
+        def __init__(self, name, kind, buzzer_factory=None, **kwargs):
+            self.name, self.kind, self.buzzer_factory = name, kind, buzzer_factory
+
+    @classmethod
+    def add(cls, output):
+        cls.outputs.append(output)
+
+
+class FakeDeviceManager:
+    buses = []
+
+    @classmethod
+    def registerBus(cls, type="i2c", i2c_bus=None):
+        cls.buses.append((type, i2c_bus))
+
+
+class FakeSDCardManager:
+    vfs = None
+    mounted = 0
+
+    @classmethod
+    def init(cls, vfs=None, **kwargs):
+        cls.vfs = vfs
+
+    @classmethod
+    def mount(cls, format=False):
+        cls.mounted += 1
 
 
 class FakeExpander:
@@ -161,6 +268,18 @@ class FakeUSBManager:
     bootsel_pin = 0
 
 
+class FakeTaskManager:
+    supervised = []
+
+    @classmethod
+    def create_supervised_task(cls, factory, restart_delay_ms=200, restart_on_return=False):
+        cls.supervised.append(factory)
+
+    @staticmethod
+    async def sleep_ms(ms):
+        pass
+
+
 BOARD = "mpos.board.sensecap_indicator"
 FRESH = (BOARD, "drivers.io_expander.tca9555", "drivers.display.st7701s.pin_spi3wire")
 X_LORA_NSS, X_LORA_RST, X_LCD_CS, X_LCD_RST, X_TOUCH_RST, X_RP2040_RST, X_LORA_TCXO = 0, 1, 4, 5, 7, 8, 11
@@ -174,6 +293,19 @@ class BoardBoot(unittest.TestCase):
         FakeInputManager.indevs = []
         FakeSensorManager.init_args = None
         FakeUSBManager.bootsel_pin = 0
+        FakeTaskManager.supervised = []
+        FakeLoRaManager.radioChip = None
+        FakeLoRaManager.board_reset = None
+        FakeLoRaManager._dio2_rf_sw = False
+        FakeLoRaManager._tcxo_mv = None
+        FakeSX1262.last = None
+        FakeLink.answers = [True]
+        FakeLink.last = None
+        FakeAudioManager.outputs = []
+        FakeDeviceManager.buses = []
+        FakeSDCardManager.vfs = None
+        FakeSDCardManager.mounted = 0
+        self.radio_error = None
         self.probe_calls = []
         self.probe_result = True
         self.probe_error = None
@@ -217,11 +349,28 @@ class BoardBoot(unittest.TestCase):
         return [e for e in FakeExpander.instances if e.dev_id in FakeExpander.present][-1]
 
     def boot(self):
-        machine = create_mock_module("machine", Pin=FakePin, PWM=FakePWM)
+        spi = create_mock_module("SPI", Bus=FakeSPIBus, Device=FakeSPIDevice)
+        machine = create_mock_module("machine", Pin=FakePin, PWM=FakePWM, SPI=spi, UART=FakeUART)
+        import drivers.indicator_rp2040
+        for sub, attrs in (("link", {"Link": FakeLink}), ("buzzer", {"RemoteBuzzer": FakeRemote}),
+                           ("i2c", {"RemoteI2C": FakeRemote}), ("sdfs", {"SDCard": FakeRemote})):
+            module = create_mock_module("drivers.indicator_rp2040." + sub, **attrs)
+            self._module("drivers.indicator_rp2040." + sub, module)
+            self._attr(drivers.indicator_rp2040, sub, module)
+
+        def make_radio(**kwargs):
+            if self.radio_error:
+                raise self.radio_error
+            return FakeSX1262(**kwargs)
+
+        self._module("lora", create_mock_module("lora", SX1262=make_radio))
+        self._module("mpos.lora_spi_adapter", create_mock_module(
+            "mpos.lora_spi_adapter", SPIAdapter=FakeSPIAdapter, wrap_sx126x_cmd=lambda radio: None))
+        self._module("mpos.polled_sx126x", create_mock_module("mpos.polled_sx126x", PolledSX126x=FakePolled))
         i2c = create_mock_module("i2c", I2C=create_mock_module("I2C", Bus=lambda **kw: "i2c-bus", Device=FakeExpander))
         lcd_bus = create_mock_module("lcd_bus", RGBBus=FakeRGBBus, MEMORY_SPIRAM=1, MEMORY_DMA=2)
         ft6x36 = create_mock_module("drivers.indev.ft6x36", FT6x36=FakeFT6x36, BITS=8)
-        for name in FRESH:
+        for name in FRESH + ("drivers.io_expander.expander_irq",):
             self._module(name, None)
             sys.modules.pop(name, None)
         self._module("machine", machine)
@@ -236,6 +385,11 @@ class BoardBoot(unittest.TestCase):
         self._attr(mpos, "InputManager", FakeInputManager)
         self._attr(mpos, "SensorManager", FakeSensorManager)
         self._attr(mpos, "USBManager", FakeUSBManager)
+        self._attr(mpos, "TaskManager", FakeTaskManager)
+        self._attr(mpos, "LoRaManager", FakeLoRaManager)
+        self._attr(mpos, "AudioManager", FakeAudioManager)
+        self._attr(mpos, "DeviceManager", FakeDeviceManager)
+        self._attr(mpos, "SDCardManager", FakeSDCardManager)
         self._attr(mpos.ui, "main_display", None)
         self._attr(mpos.ui, "back_screen", lambda: self.back_calls.append(1))
         self.back_calls = []
@@ -341,6 +495,44 @@ class TestLoRaDetection(BoardBoot):
         self.probe_error = OSError(5)
         board = self.boot()
         self.assertFalse(board.lora_present)
+        self.assertEqual(FakeSensorManager.init_args, (None,))
+
+
+class TestRP2040(BoardBoot):
+    def test_link_runs_on_uart2_at_2_mbaud(self):
+        self.boot()
+        uart = FakeUART.last
+        self.assertEqual(uart.uart_id, 2)
+        self.assertEqual((uart.kwargs["tx"], uart.kwargs["rx"], uart.kwargs["baudrate"]), (19, 20, 2_000_000))
+        self.assertTrue(FakeLink.last.uart is uart)
+
+    def test_sd_grove_and_buzzer_are_offered(self):
+        board = self.boot()
+        self.assertTrue(board.rp2040_link is FakeLink.last)
+        self.assertTrue(isinstance(FakeSDCardManager.vfs, FakeRemote))
+        self.assertEqual(FakeSDCardManager.mounted, 1)
+        self.assertEqual(FakeDeviceManager.buses, [("i2c", board.grove_i2c)])
+        self.assertEqual([(o.name, o.kind) for o in FakeAudioManager.outputs], [("Buzzer", "buzzer")])
+        buzzer = FakeAudioManager.outputs[0].buzzer_factory()
+        self.assertTrue(buzzer.link is board.rp2040_link)
+
+    def test_a_tone_left_sounding_before_the_reset_is_silenced(self):
+        self.boot()
+        self.assertEqual(FakeLink.last.sent, [{"tone": {"frequency_hz": 0}}])
+
+    def test_second_try_when_the_rp2040_is_still_booting(self):
+        FakeLink.answers = [False, True]
+        board = self.boot()
+        self.assertEqual(FakeLink.last.connects, 2)
+        self.assertTrue(board.rp2040_link is FakeLink.last)
+
+    def test_original_rp2040_firmware_leaves_the_peripherals_out(self):
+        FakeLink.answers = [False, False]
+        board = self.boot()
+        self.assertIsNone(board.rp2040_link)
+        self.assertIsNone(board.grove_i2c)
+        self.assertIsNone(FakeSDCardManager.vfs)
+        self.assertEqual(FakeAudioManager.outputs, [])
         self.assertEqual(FakeSensorManager.init_args, (None,))
 
 
