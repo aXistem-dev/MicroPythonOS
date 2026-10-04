@@ -116,6 +116,7 @@ if [ -z "$target" ]; then
     echo "Example: $0 esp32p4 (ESP32-P4 + ESP32-C6 Wi-Fi co-processor, e.g. Waveshare ESP32-P4-WIFI6-Touch-LCD boards)"
     echo "Example: $0 unphone"
     echo "Example: $0 lilygo_t4"
+    echo "Example: $0 sensecap_indicator"
     echo "Example: $0 clean"
 	exit 1
 fi
@@ -312,7 +313,7 @@ if [ ! -f "$codebasedir"/lvgl_micropython/lib/micropython/mpy-cross/build/mpy-cr
 fi
 
 echo "Refreshing freezefs..."
-if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" -o "$target" == "esp32p4" ]; then
+if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" -o "$target" == "esp32p4" -o "$target" == "sensecap_indicator" ]; then
 	builtin_march="xtensawin"
 	[ "$target" == "esp32p4" ] && builtin_march="rv32imc"  # ESP32-P4 is RISC-V
 else
@@ -337,7 +338,7 @@ if [ "$target" != "web" ]; then
 	reset_web_port_changes
 fi
 
-if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" -o "$target" == "esp32p4" ]; then
+if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o "$target" == "esp32-small" -o "$target" == "lilygo_t4" -o "$target" == "esp32p4" -o "$target" == "sensecap_indicator" ]; then
 	# Cleanup compiled .py files, otherwise if one from lib/ gets delected, the old .mpy might be used
 	rm -r lvgl_micropython/lib/micropython/ports/esp32/build-ESP32_GENERIC-SPIRAM/frozen_mpy 2>/dev/null
 	rm -r lvgl_micropython/lib/micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/frozen_mpy 2>/dev/null
@@ -406,8 +407,8 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
 		# of PSRAM continuously (480x800 RGB565 at 60 Hz is 46 MB/s) and
 		# MicroPython's default 20 MHz PSRAM clock cannot feed it.
 		extra_configs="CONFIG_IDF_EXPERIMENTAL_FEATURES=y CONFIG_SPIRAM_SPEED_200M=y CONFIG_CACHE_L2_CACHE_256KB=y CONFIG_CACHE_L2_CACHE_LINE_128B=y"
-	else # esp32s3 or unphone
-        if [ "$target" == "unphone" ]; then
+	else # esp32s3, unphone or sensecap_indicator
+        if [ "$target" == "unphone" -o "$target" == "sensecap_indicator" ]; then
             flash_size="8"
             otasupport="" # too small for 2 OTA partitions + internal storage
         fi
@@ -420,6 +421,17 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
         #extra_configs="$extra_configs --py-freertos"
         # Enable UART based REPL, in addition to the USB-CDC or JTAG REPL. Can be disabled with esp.uart_repl(False)
         extra_configs="$extra_configs --enable-uart-repl=y"
+        if [ "$target" == "sensecap_indicator" ]; then
+            # The board's USB-C is a CH340 on UART0; GPIO19/20 (the S3's native USB pads) carry the
+            # RP2040 UART, so TinyUSB device mode must not claim them.
+            extra_configs="$extra_configs --enable-cdc-repl=n"
+            export MPOS_NO_USBDEV=1
+            # The RGB panel's framebuffers are in PSRAM, where a DMA underrun can leave the pixel
+            # stream shifted; Espressif's mitigation restarts the transfer every VSYNC so such a
+            # desync heals within one frame.
+            # (CONFIG_LCD_RGB_ISR_IRAM_SAFE hangs display init: lcd_bus's callbacks are not in IRAM.)
+            extra_configs="$extra_configs CONFIG_LCD_RGB_RESTART_IN_VSYNC=y"
+        fi
         if [ "$usbhost" == "1" ]; then
             # USB host (needs the adapter behind a USB hub to
             # enumerate: explicit IDF usb_host external-hub support, off by
@@ -444,7 +456,7 @@ if [ "$target" == "esp32" -o "$target" == "esp32s3" -o "$target" == "unphone" -o
         fi
 	fi
 
-	if [ "$BOARD_VARIANT" == "SPIRAM" -o "$BOARD_VARIANT" == "SPIRAM_OCT" ]; then
+	if [ "$BOARD_VARIANT" == "SPIRAM" -o "$BOARD_VARIANT" == "SPIRAM_OCT" ] && [ "$target" != "sensecap_indicator" ]; then
 		# Camera only works on boards configured with spiram, otherwise the build breaks
 		extra_configs="$extra_configs USER_C_MODULE=$codebasedir/micropython-camera-API/src/micropython.cmake"
 	fi
