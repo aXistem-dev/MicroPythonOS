@@ -19,7 +19,10 @@ https://github.com/Seeed-Solution/SenseCAP_Indicator_RP2040
 * PCA9535 IO expander at 0x20, or 0x39 (sensecap_indicator_board.c probes that address when 0x20
   does not answer), /INT on GPIO42
 * User button on GPIO38 (active low), backlight PWM on GPIO45
-* RP2040 co-processor (SD card slot, buzzer, Grove ports) on UART TX19/RX20, reset on expander pin 8
+* RP2040 co-processor (SD card slot, buzzer, Grove ports) on UART TX19/RX20, reset on expander pin 8.
+  With indicator_rp2040 firmware on the RP2040 (see the docs for this board) this file offers its
+  SD card as /sdcard, its Grove I2C bus (also the D1S/D1Pro sensors) as a machine.I2C stand-in,
+  and its buzzer as an AudioManager output (drivers/indicator_rp2040)
 * D1L/D1Pro: SX1262 LoRa radio, SPI on GPIO41/48/47, NSS/RST/BUSY/DIO1 on expander pins 0-3,
   TCXO strap on expander pin 11 (high: 2.4 V TCXO on DIO3, low: crystal)
 * D1S/D1Pro: SCD41 CO2, SGP40 tVOC and the Grove AHT20 are wired to the RP2040, not to the ESP32-S3
@@ -225,7 +228,50 @@ finally:
         machine.Pin(_gpio, machine.Pin.IN)
 if __debug__: logger.debug("sensecap_indicator: LoRa radio %s", "present" if lora_present else "absent")
 
-# 6) No IMU on this board: MCU temperature only
+
+# 6) RP2040 co-processor over UART at 2 Mbaud. With Seeed's original RP2040 firmware it does not
+#    answer, and the SD card, Grove I2C and buzzer are left out.
+rp2040_link = None
+grove_i2c = None
+_rp2040_uart = None
+try:
+    from drivers.indicator_rp2040.link import Link
+
+    _rp2040_uart = machine.UART(2, baudrate=2_000_000, tx=RP2040_UART_TX, rx=RP2040_UART_RX,
+                                rxbuf=16384, timeout=10)
+    _link = Link(_rp2040_uart, timeout_ms=500)
+    # The RP2040 may still be finishing its own boot: give it a second chance
+    if _link.connect(raise_errors=False) or _link.connect(raise_errors=False):
+        from drivers.indicator_rp2040 import buzzer
+        from drivers.indicator_rp2040.i2c import RemoteI2C
+        from drivers.indicator_rp2040.sdfs import SDCard
+        from mpos import AudioManager, DeviceManager, SDCardManager, SharedPreferences
+        from mpos.ui import render_guard
+
+        rp2040_link = _link
+        # An LVGL pass that starts while this thread is in the middle of a request (and would
+        # read an image from the card) waits for the next tick instead of failing with EBUSY
+        render_guard.add_busy_check(rp2040_link.owned_by_current_thread)
+        buzzer.reset(rp2040_link)  # silences a tune cut off by an ESP32 reset
+        SDCardManager.init(vfs=SDCard(rp2040_link))
+        SDCardManager.mount()  # with or without a card: the RP2040 picks up an inserted card
+        grove_i2c = RemoteI2C(rp2040_link)
+        DeviceManager.registerBus(type="i2c", i2c_bus=grove_i2c)
+        AudioManager.add(AudioManager.Output("Buzzer", "buzzer",
+                                             buzzer_factory=lambda: buzzer.RemoteBuzzer(rp2040_link)))
+        if __debug__: logger.debug("sensecap_indicator: RP2040 link up")
+        if SharedPreferences("com.micropythonos.settings").get_string("startup_sound", "on") != "off":
+            AudioManager.player(rtttl="5_note_startup:d=8,o=6,b=200:c,d,e,g,4c7",
+                                stream_type=AudioManager.STREAM_NOTIFICATION, volume=60).start()
+    else:
+        logger.warning("sensecap_indicator: no answer from the RP2040 (indicator_rp2040 firmware missing?): "
+                       "no SD card, Grove I2C or buzzer")
+except Exception as e:
+    logger.error("sensecap_indicator: RP2040 link setup failed: %s", e)
+if rp2040_link is None and _rp2040_uart is not None:
+    _rp2040_uart.deinit()  # gives back its 16 KB receive buffer
+
+# 7) No IMU on this board: MCU temperature only
 SensorManager.init(None)
 
 if __debug__: logger.debug("sensecap_indicator.py finished")
