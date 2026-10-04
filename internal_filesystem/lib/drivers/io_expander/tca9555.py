@@ -36,16 +36,26 @@ class TCA9555:
         data = self.tca_dev.read(2)
         return struct.unpack("<H", data)[0]
 
-    def pin_mode(self, pin, mode):
+    def pin_mode(self, pin, mode, value=None):
+        """With mode OUT and a value, the level is latched before the pin turns into an output,
+        so a reset or chip-select line never glitches while it is being configured."""
         if pin & 0x40:  # Pins with 0x40 bit set are controlled by TCA9555
             pin &= 0xBF  # clear the 0x40 marker bit
+            if mode == machine.Pin.OUT and value is not None:
+                if value:
+                    self.output_states |= 1 << pin
+                else:
+                    self.output_states &= ~(1 << pin)
+                self._write_word(self.REG_OUTPUT, self.output_states)
             if mode == machine.Pin.OUT:
                 self.directions &= ~(1 << pin)
             else:
                 self.directions |= 1 << pin
             self._write_word(self.REG_CONFIG, self.directions)
-        else:
+        elif value is not None:
             # Handle standard ESP32 pin
+            machine.Pin(pin, mode, value=value)
+        else:
             machine.Pin(pin, mode)
 
     def digital_write(self, pin, value):
@@ -81,6 +91,10 @@ class TCA9555:
             p = machine.Pin(pin, machine.Pin.IN)
             return p.value()
 
+    def read_inputs(self):
+        """Read both input ports without rewriting CONFIG (safe for output pins too)."""
+        return self._read_word(self.REG_INPUT)
+
 
 class TCA9555Pin:
     """
@@ -89,15 +103,23 @@ class TCA9555Pin:
     is expected, for example a reset line.
     """
 
-    def __init__(self, tca: TCA9555, pin: int, mode=machine.Pin.OUT):
+    IN = machine.Pin.IN
+    OUT = machine.Pin.OUT
+
+    def __init__(self, tca: TCA9555, pin: int, mode=machine.Pin.OUT, *, value=None):
         self.tca = tca
         self.pin = pin
-        self.tca.pin_mode(pin, mode)
+        self.init(mode, value=value)
+
+    def init(self, mode=machine.Pin.OUT, *, value=None):
+        """Reconfigure the pin like machine.Pin.init(); see TCA9555.pin_mode() for `value`."""
+        self.tca.pin_mode(self.pin, mode, value)
 
     def value(self, v=None):
         if v is None:
-            # No readback support for output-only pins
-            return None
+            if self.pin & 0x40:
+                return 1 if self.tca.read_inputs() & (1 << (self.pin & 0xBF)) else 0
+            return machine.Pin(self.pin).value()
         self.tca.digital_write(self.pin, v)
 
     def __call__(self, v=None):
