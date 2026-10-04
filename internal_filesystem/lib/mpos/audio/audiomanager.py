@@ -49,12 +49,16 @@ class AudioManager:
             on_open=None,
             on_close=None,
             warm_ms=0,
+            buzzer_factory=None,
         ):
             """warm_ms: keep the I2S clocks running and the codec unmuted for this
             many ms after a clip ends, so back-to-back clips start click-free
             (codecs such as the ES8311 click on every clock restart / unmute).
             0 (default) closes the output after every clip. The warm output is
-            also released by WAVStream.release_warm() and before recording."""
+            also released by WAVStream.release_warm() and before recording.
+            buzzer_factory: for a buzzer that is not on a GPIO of this chip, a callable
+            returning a PWM-like object (freq(), duty_u16(), deinit()); it replaces
+            buzzer_pin."""
             if kind not in ("i2s", "buzzer"):
                 raise ValueError("Output.kind must be 'i2s' or 'buzzer'")
             if channels not in (1, 2):
@@ -75,10 +79,11 @@ class AudioManager:
                 self.i2s_pins = dict(i2s_pins)
                 self.buzzer_pin = None
             else:
-                if buzzer_pin is None:
-                    raise ValueError("Output.buzzer_pin required for buzzer output")
+                if buzzer_pin is None and buzzer_factory is None:
+                    raise ValueError("Output.buzzer_pin or buzzer_factory required for buzzer output")
                 self.buzzer_pin = buzzer_pin
                 self.i2s_pins = None
+            self.buzzer_factory = buzzer_factory if kind == "buzzer" else None
 
         @staticmethod
         def _validate_i2s_pins(i2s_pins):
@@ -672,13 +677,7 @@ class Player:
         if self._stream:
             self._stream.stop()
         if self._buzzer:
-            try:
-                from machine import Pin
-                self._buzzer.deinit()
-                Pin(self.output.buzzer_pin, Pin.IN)  # reconfigure buzzer_pin as INPUT to disassociate it from PWM
-                self._buzzer = None
-            except Exception:
-                pass
+            self._release_buzzer()
         self._manager._session_finished(self)
 
     def pause(self):
@@ -721,10 +720,23 @@ class Player:
             return self._stream.get_duration_ms()
         return None
 
+    def _release_buzzer(self):
+        try:
+            self._buzzer.deinit()
+            if self.output.buzzer_pin is not None:
+                from machine import Pin
+                Pin(self.output.buzzer_pin, Pin.IN)  # reconfigure buzzer_pin as INPUT to disassociate it from PWM
+            self._buzzer = None
+        except Exception:
+            pass
+
     def pin_usage(self):
         if not self.output:
             return {}
         if self.output.kind == "buzzer":
+            if self.output.buzzer_pin is None:
+                # a buzzer behind another chip has no GPIO, but two tunes on it still conflict
+                return {("buzzer", id(self.output)): "buzzer"}
             return {self.output.buzzer_pin: "buzzer"}
         if self.output.kind == "i2s":
             return _pin_map_i2s_output(self.output.i2s_pins)
@@ -739,13 +751,7 @@ class Player:
         finally:
             if not (self._stream and getattr(self._stream, "runs_async", False)):
                 if self._buzzer:
-                    try:
-                        from machine import Pin
-                        self._buzzer.deinit()
-                        Pin(self.output.buzzer_pin, Pin.IN)  # reconfigure buzzer_pin as INPUT to disassociate it from PWM
-                        self._buzzer = None
-                    except Exception:
-                        pass
+                    self._release_buzzer()
                 self._manager._session_finished(self)
 
     def _play_rtttl(self):
@@ -759,7 +765,7 @@ class Player:
             except ImportError:
                 pass
 
-        if sys.platform != "esp32" and not is_web:
+        if self.output.buzzer_factory is None and sys.platform != "esp32" and not is_web:
             self._stream = DesktopRTTTLStream(
                 rtttl_string=self.rtttl,
                 stream_type=self.stream_type,
@@ -770,9 +776,11 @@ class Player:
             self._stream.play()
             return
 
-        from machine import PWM
-
-        self._buzzer = PWM(self.output.buzzer_pin, duty_u16=0)
+        if self.output.buzzer_factory is not None:
+            self._buzzer = self.output.buzzer_factory()
+        else:
+            from machine import PWM
+            self._buzzer = PWM(self.output.buzzer_pin, duty_u16=0)
 
         on_complete = self.on_complete
         stream_class = RTTTLStream

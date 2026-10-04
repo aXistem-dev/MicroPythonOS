@@ -316,3 +316,75 @@ class TestOutputWarmMs(unittest.TestCase):
     def test_value_is_stored(self):
         out = AudioManager.Output(name="spk", kind="i2s", i2s_pins={"ws": 1, "sd": 2}, warm_ms=30000)
         self.assertEqual(out.warm_ms, 30000)
+
+
+class _RecordingBuzzer:
+    """PWM-like object handed out by a buzzer_factory: records what the RTTTL player does."""
+
+    def __init__(self):
+        self.calls = []
+
+    def freq(self, f=None):
+        self.calls.append(("freq", f))
+
+    def duty_u16(self, d=None):
+        self.calls.append(("duty_u16", d))
+
+    def deinit(self):
+        self.calls.append(("deinit",))
+
+
+class TestBuzzerFactory(unittest.TestCase):
+    """A buzzer output can come from a factory instead of a GPIO pin (a buzzer driven by
+    another chip, e.g. a co-processor reached over a serial link)."""
+
+    def setUp(self):
+        AudioManager._instance = None
+        MockSharedPreferences.reset_all()
+        MockThread.clear_threads()
+        AudioManager()
+        self.made = []
+
+        def factory():
+            b = _RecordingBuzzer()
+            self.made.append(b)
+            return b
+
+        self.output = AudioManager.add(AudioManager.Output("Buzzer", "buzzer", buzzer_factory=factory))
+        AudioManager.set_volume(70)
+
+    def tearDown(self):
+        AudioManager.stop()
+
+    def test_output_needs_a_pin_or_a_factory(self):
+        with self.assertRaises(ValueError):
+            AudioManager.Output("Buzzer", "buzzer")
+
+    def test_rtttl_plays_on_the_factory_buzzer(self):
+        import time
+        player = AudioManager.player(rtttl="t:d=8,o=5,b=900:c,e", output=self.output)
+        player.start()
+        if MockThread._started_threads:
+            func, args = MockThread._started_threads[-1]
+            func(*args)                   # mocked _thread: run the play thread here
+        t0 = time.ticks_ms()              # a real thread: wait for it to finish
+        while time.ticks_diff(time.ticks_ms(), t0) < 3000:
+            if self.made and self.made[0].calls and self.made[0].calls[-1] == ("deinit",):
+                break
+            time.sleep_ms(10)
+        self.assertEqual(len(self.made), 1)
+        calls = self.made[0].calls
+        self.assertEqual([c[1] for c in calls if c[0] == "freq"], [523, 659])
+        self.assertTrue(any(c[0] == "duty_u16" and c[1] > 0 for c in calls))
+        self.assertEqual(calls[-1], ("deinit",))
+
+    def test_a_second_tune_on_the_factory_buzzer_replaces_the_first(self):
+        # like a pin buzzer: two sessions on the same buzzer conflict, so the new one wins
+        first = AudioManager.player(rtttl="t:d=8,o=5,b=900:c", output=self.output)
+        second = AudioManager.player(rtttl="t:d=8,o=5,b=900:e", output=self.output)
+        self.assertTrue(first.pin_usage())
+        self.assertTrue(AudioManager.get()._sessions_conflict(first, second))
+
+    def test_factory_output_claims_no_gpio(self):
+        player = AudioManager.player(rtttl="t:d=8,o=5,b=900:c", output=self.output)
+        self.assertFalse(any(isinstance(k, int) for k in player.pin_usage()))
