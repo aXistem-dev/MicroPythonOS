@@ -1,6 +1,9 @@
 Future release (next version)
 =====
 
+Board Support:
+- Add Seeed SenseCAP Indicator D1/D1S/D1L/D1Pro (4" 480x480 ST7701S RGB panel with its 3-wire init behind a PCA9535 IO expander, FT6336U touch, user button, PWM backlight, LoRa radio detection on the D1L/D1Pro) with a `sensecap_indicator` build target (8 MB flash, no OTA, UART REPL on the CH340); adds TCA9555Pin readback, a selectable ST7701S init sequence, PinSpi3Wire, and a configurable USBManager.bootsel_pin
+
 Frameworks:
 - qrdecode: faster QR scanning with bit-identical results. quirc rounds perspective-mapped points without a rintf() library call where there is no rounding instruction (ESP32) and scans for finder patterns run by run; the decoder (about 400 KB at 640x640) is kept between frames instead of being allocated and freed for every frame, and the camera frame is read in place instead of copied. New qrdecode.release() frees the decoder; the Camera activity calls it when QR scanning stops or the activity is paused
 - qrdecode: exceptions from qrdecode_rgb565() are now caught by the caller's except clause; they used to skip it (and could leave the caller's frame in a broken state) because the error path popped the caller's exception handler as well as its own
