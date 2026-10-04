@@ -1,6 +1,9 @@
 Future release (next version)
 =====
 
+Board Support:
+- Add Seeed SenseCAP Indicator D1/D1S/D1L/D1Pro (4" 480x480 ST7701S RGB panel with its 3-wire init behind a PCA9535 IO expander, FT6336U touch, user button, PWM backlight, LoRa radio detection on the D1L/D1Pro) with a `sensecap_indicator` build target (8 MB flash, no OTA, UART REPL on the CH340); adds TCA9555Pin readback, a selectable ST7701S init sequence, PinSpi3Wire, and a configurable USBManager.bootsel_pin
+
 0.20.0
 ======
 
