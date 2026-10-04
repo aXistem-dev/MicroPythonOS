@@ -17,7 +17,7 @@ https://github.com/Seeed-Solution/SenseCAP_Indicator_RP2040
   clock/data on GPIO41/48, shared with the LoRa radio's SPI
 * FT6336U capacitive touch at 0x48 (reset on the IO expander)
 * PCA9535 IO expander at 0x20, or 0x39 (sensecap_indicator_board.c probes that address when 0x20
-  does not answer), /INT on GPIO42
+  does not answer), /INT on GPIO42 (carries the radio's DIO1)
 * User button on GPIO38 (active low), backlight PWM on GPIO45
 * RP2040 co-processor (SD card slot, buzzer, Grove ports) on UART TX19/RX20, reset on expander pin 8.
   With indicator_rp2040 firmware on the RP2040 (see the docs for this board) this file offers its
@@ -28,7 +28,8 @@ https://github.com/Seeed-Solution/SenseCAP_Indicator_RP2040
 * D1S/D1Pro: SCD41 CO2, SGP40 tVOC and the Grove AHT20 are wired to the RP2040, not to the ESP32-S3
 
 All four variants share the same ESP32-S3 side. The variants differ only in the radio, which
-this file detects (lora_present), and in the RP2040-side sensors.
+this file detects (lora_present) and hands to LoRaManager as a polled SX1262, and in the
+RP2040-side sensors.
 
 GPIO0 (BOOT) is the top red bit of the RGB bus, so the USB BOOT-button escape hatch is disabled.
 GPIO19/20 (the native USB pins) carry the RP2040 UART, so the sensecap_indicator build target
@@ -113,6 +114,8 @@ lcd_cs = TCA9555Pin(tca, X_LCD_CS, machine.Pin.OUT, value=1)
 lcd_reset = TCA9555Pin(tca, X_LCD_RST, machine.Pin.OUT, value=1)
 touch_reset = TCA9555Pin(tca, X_TOUCH_RST, machine.Pin.OUT, value=1)
 rp2040_reset = TCA9555Pin(tca, X_RP2040_RST, machine.Pin.OUT, value=1)  # low holds the RP2040 in reset
+lora_busy = TCA9555Pin(tca, X_LORA_BUSY, machine.Pin.IN)
+_lora_tcxo = TCA9555Pin(tca, X_LORA_TCXO, machine.Pin.IN)
 
 # 2) Panel: hardware reset, then the 3-wire register init on GPIO41/48 (before anything claims the SPI host)
 lcd_reset(0)
@@ -212,7 +215,6 @@ except Exception as e:
     logger.error("sensecap_indicator: button init failed: %s", e)
 
 # 5) LoRa radio (D1L/D1Pro only): detect it by reading a register with a known reset value.
-#    The radio's pins (expander pins 0-3, SPI_*) are listed above for a LoRa driver to use.
 lora_present = False
 try:
     _sck = machine.Pin(SPI_SCK, machine.Pin.OUT, value=0)
@@ -227,9 +229,68 @@ finally:
     for _gpio in (SPI_SCK, SPI_MOSI, SPI_MISO):
         machine.Pin(_gpio, machine.Pin.IN)
 if __debug__: logger.debug("sensecap_indicator: LoRa radio %s", "present" if lora_present else "absent")
+lora_tcxo_mv = None
+if lora_present:
+    lora_tcxo_mv = 2400 if _lora_tcxo() else None  # the strap on expander pin 11
 
 
-# 6) RP2040 co-processor over UART at 2 Mbaud. With Seeed's original RP2040 firmware it does not
+def _lora_reset_pulse():
+    lora_reset(0)
+    time.sleep_ms(2)
+    lora_reset(1)
+    time.sleep_ms(10)
+
+
+# 6) Hand the radio to LoRaManager: SPI host 1 on GPIO41/48/47 with NSS, RESET and BUSY on the
+#    expander, DIO2 driving the RF switch. DIO1 is an expander input too: its edges arrive through
+#    the expander's shared /INT line (GPIO42), so the driver gets an interrupt-capable pin for it.
+lora_spi_bus = None
+lora_spi_device = None
+expander_irq = None
+if lora_present:
+    try:
+        from drivers.io_expander.expander_irq import ExpanderIRQ
+        from mpos import TaskManager
+
+        expander_irq = ExpanderIRQ(tca, machine.Pin(EXPANDER_INT, machine.Pin.IN, machine.Pin.PULL_UP))
+
+        async def _expander_irq_safety_net():
+            # catches an edge that was lost, or whose /INT another read of the expander released
+            while True:
+                expander_irq.check()
+                await TaskManager.sleep_ms(100)
+
+        TaskManager.create_supervised_task(_expander_irq_safety_net, restart_on_return=True)
+    except Exception as e:
+        logger.error("sensecap_indicator: expander interrupt setup failed: %s", e)
+    try:
+        from lora import SX1262
+        from mpos import LoRaManager
+        from mpos.lora_spi_adapter import SPIAdapter, wrap_sx126x_cmd
+        from mpos.polled_sx126x import PolledSX126x
+
+        lora_spi_bus = machine.SPI.Bus(host=1, mosi=SPI_MOSI, miso=SPI_MISO, sck=SPI_SCK)
+        lora_spi_device = machine.SPI.Device(
+            spi_bus=lora_spi_bus, freq=8_000_000, cs=-1, polarity=0, phase=0,
+            firstbit=machine.SPI.Device.MSB, bits=8,
+        )
+        _radio = SX1262(
+            spi=SPIAdapter(lora_spi_device), cs=lora_nss, busy=lora_busy,
+            dio1=expander_irq.pin(X_LORA_DIO1) if expander_irq else None,
+            dio2_rf_sw=True, dio3_tcxo_millivolts=lora_tcxo_mv, dio3_tcxo_start_time_us=1000,
+            reset=lora_reset,
+        )
+        wrap_sx126x_cmd(_radio)
+        LoRaManager.radioChip = PolledSX126x(_radio)
+        LoRaManager.board_reset = _lora_reset_pulse
+        LoRaManager._dio2_rf_sw = True
+        LoRaManager._tcxo_mv = lora_tcxo_mv
+        LoRaManager._tcxo_start_us = 1000
+    except Exception as e:
+        logger.error("sensecap_indicator: LoRa radio init failed: %s", e)
+    lcd_cs(1)  # the panel shares SCK/MOSI with the radio and must stay deselected
+
+# 7) RP2040 co-processor over UART at 2 Mbaud. With Seeed's original RP2040 firmware it does not
 #    answer, and the SD card, Grove I2C and buzzer are left out.
 rp2040_link = None
 grove_i2c = None
@@ -271,7 +332,7 @@ except Exception as e:
 if rp2040_link is None and _rp2040_uart is not None:
     _rp2040_uart.deinit()  # gives back its 16 KB receive buffer
 
-# 7) No IMU on this board: MCU temperature only
+# 8) No IMU on this board: MCU temperature only
 SensorManager.init(None)
 
 if __debug__: logger.debug("sensecap_indicator.py finished")
