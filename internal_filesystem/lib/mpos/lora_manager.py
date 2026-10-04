@@ -2,8 +2,7 @@
 #
 # ponytail: lock + reset + watchdog in one file. Apps use acquire()/release()
 # to claim the single physical radio; the watchdog auto-recovers from SPI
-# bus contention wedges (PR #222). Meshcore's recovery pattern is now a
-# framework service.
+# bus contention wedges (PR #222).
 import logging
 
 logger = logging.getLogger(__name__)
@@ -11,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 class LoRaManager:
     radioChip = None
+    board_reset = None  # board hook: zero-arg callable pulsing the radio's reset line
+    _lora_spi_device = None  # set by boards that rebuild the radio on their own SPI device
+    _dio2_rf_sw = False  # board sets True when DIO2 drives the RF switch (re-armed after a reset)
     _holder = None
     _watchdog_active = False
     _last_status = None
@@ -54,16 +56,30 @@ class LoRaManager:
         return LoRaManager._holder
 
     @staticmethod
+    def _pulse_reset():
+        # Hardware-reset the LoRa chip: through the board's hook when it set one, otherwise by
+        # toggling the Fri3d CH32 expander config (0x03 = aux + LCD + LoRa OFF, 0x13 = ON).
+        if LoRaManager.board_reset is not None:
+            LoRaManager.board_reset()
+            return True
+        import mpos
+        import time
+        exp = getattr(mpos, "io_expander", None)
+        if exp is None:
+            return False
+        exp.config = 0x03
+        time.sleep_ms(200)
+        exp.config = 0x13
+        time.sleep_ms(200)
+        if not exp.config[0]:
+            if __debug__:
+                logger.debug("CH32 LoRa reset: readback check failed")
+            return False
+        return True
+
+    @staticmethod
     def reset_chip():
-        # Toggle CH32 expander config to hardware-reset the LoRa chip.
-        # 0x03 = aux + LCD + LoRa OFF (assert reset)
-        # 0x13 = aux + LCD + LoRa ON  (release reset)
-        # expander config setter handles readback + retry + LVGL safe.
         try:
-            import mpos
-            exp = getattr(mpos, "io_expander", None)
-            if exp is None:
-                return False
             import time
             chip = LoRaManager.radioChip
             if chip and __debug__:
@@ -72,22 +88,14 @@ class LoRaManager:
                     logger.debug("reset_chip: pre-reset status=0x%02x", st_pre)
                 except Exception:
                     logger.debug("reset_chip: pre-reset status read failed (chip non-responsive)")
-            exp.config = 0x03
-            time.sleep_ms(200)
-            exp.config = 0x13
-            time.sleep_ms(200)
-            if not exp.config[0]:
-                if __debug__:
-                    logger.debug("CH32 LoRa reset: readback check failed")
+            if not LoRaManager._pulse_reset():
                 return False
             chip = LoRaManager.radioChip
             if not chip:
                 if __debug__:
-                    logger.debug("LoRa chip reset via CH32 expander")
+                    logger.debug("LoRa chip reset")
                 return True
             r = chip.radio
-            if __debug__:
-                logger.debug("reset_chip: expander confirms lora_reset=%s", exp.config[0])
             for retry in range(3):
                 try:
                     r._sleep = True
@@ -110,8 +118,10 @@ class LoRaManager:
                         except Exception as e:
                             logger.warning("reset_chip: TCXO error check FAILED: %s", e)
                     r._cmd("BB", 0x8A, 1)  # SET_PACKET_TYPE → LoRa
+                    if LoRaManager._dio2_rf_sw:
+                        r._cmd("BB", 0x9D, 1)  # SET_DIO2_AS_RF_SWITCH_CTRL: a reset clears it
                     r._cmd(">BHHHH", 0x08,
-                        579,    # IrqMask: TX(1)|RX(2)|CRC_ERR(64)|TIMEOUT(512)
+                        599,    # IrqMask: TX(1)|RX(2)|PREAMBLE(4)|HEADER_VALID(16)|CRC_ERR(64)|TIMEOUT(512)
                         515,    # DIO1Mask: TX(1)|RX(2)|TIMEOUT(512)
                         0, 0)   # DIO2Mask, DIO3Mask
                     r._clear_irq()
@@ -128,19 +138,16 @@ class LoRaManager:
                     break
                 if retry < 2:
                     logger.warning("reset_chip: chip unresponsive, re-resetting")
-                    exp.config = 0x03
-                    time.sleep_ms(200)
-                    exp.config = 0x13
-                    time.sleep_ms(200)
+                    LoRaManager._pulse_reset()
             else:
                 logger.warning("reset_chip: FAILED after 3 tries")
                 return False
             if __debug__:
-                logger.debug("LoRa chip reset via CH32 expander")
+                logger.debug("LoRa chip reset")
             return True
         except Exception as e:
             if __debug__:
-                logger.debug("CH32 LoRa reset failed: %s", e)
+                logger.debug("LoRa reset failed: %s", e)
             return False
 
     @staticmethod
@@ -210,7 +217,7 @@ class LoRaManager:
 
         # Only continuous RX (0x50) is healthy — the chip should always be
         # listening. Transient modes (FS 0x40, TX 0x60, STANDBY 0x20/0x30)
-        # are brief during tx/rx transitions; a stuck non-RX mode means the
+        # are short during tx/rx transitions; a stuck non-RX mode means the
         # chip fell out of receive and needs recovery.
         if mode == 0x50:
             if LoRaManager._bad_count:
@@ -259,7 +266,8 @@ class LoRaManager:
                 logger.debug("Watchdog: hardware reset (status 0x00, bad=%d)", bad)
 
             chip.disable_irq()
-            if LoRaManager._lora_spi_device is not None and LoRaManager.reset_chip():
+            can_reset = LoRaManager._lora_spi_device is not None or LoRaManager.board_reset is not None
+            if can_reset and LoRaManager.reset_chip():
                 # ponytail: reset_chip() already reset state flags
                 # (_sleep=True, _configured=False, _rx=False) and did
                 # TCXO init + SET_PACKET_TYPE + DIO_IRQ + _clear_irq
