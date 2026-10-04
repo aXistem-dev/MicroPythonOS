@@ -3,11 +3,15 @@ Future release (next version)
 
 Board Support:
 - Add Seeed SenseCAP Indicator D1/D1S/D1L/D1Pro: 4" 480x480 ST7701S RGB panel (3-wire init behind a PCA9535 IO expander), FT6336U touch, user button as back, PWM backlight, and a `sensecap_indicator` build target (8 MB flash without OTA, REPL on the CH340 UART)
+- SenseCAP Indicator: SD card at /sdcard, Grove I2C bus (also the D1S/D1Pro sensors) and buzzer through the RP2040 co-processor running indicator_rp2040 firmware; on firmware without the tone message the buzzer keeps a tune's rhythm at one pitch
 
 Frameworks:
 - io_expander: TCA9555Pin reads input levels back, latches an initial output level before the pin turns into an output, and has machine.Pin-style init() and IN/OUT
 - st7701s: init(type) selects an alternative panel init sequence (_st7701s_init_type<type>, type 17 added); PinSpi3Wire runs the 3-wire init over any pin-like objects, such as an IO expander pin for CS
 - USBManager: bootsel_pin moves the BOOT-button check of the CDC escape hatch off GPIO0, or turns it off, for boards that use GPIO0 for something else
+- AudioManager: a buzzer output can take `buzzer_factory` (a callable returning a PWM-like object) instead of `buzzer_pin`, for buzzers driven through another chip
+- SDCardManager: `init(vfs=...)` mounts a ready-made VFS at /sdcard, for SD cards driven by another chip
+- render_guard: add_busy_check() skips an LVGL pass while the current thread holds a driver lock the pass may need, such as a co-processor link it is in the middle of a request on
 
 0.21.1
 ======
