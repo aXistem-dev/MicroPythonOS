@@ -3,6 +3,7 @@ Future release (next version)
 
 Board Support:
 - Fri3d 2026 badge: B/Y buttons now also reach apps as ord("B")/ord("Y") KEY events (dual delivery), in addition to their NEXT/PREV focus-navigation role. Previously LVGL consumed NEXT/PREV for tabbing so apps never saw B/Y (e.g. Quasi Bird's FPS toggle and high-score reset did nothing). Tab navigation is unchanged; matches the fri3d 2024 badge and desktop SDL.
+- Add Seeed SenseCAP Indicator D1/D1S/D1L/D1Pro: 4" 480x480 ST7701S RGB panel (3-wire init behind a PCA9535 IO expander), FT6336U touch, user button as back, PWM backlight, and a `sensecap_indicator` build target (8 MB flash without OTA, REPL on the CH340 UART)
 
 Frameworks:
 - qrdecode: faster QR scanning with bit-identical results. quirc rounds perspective-mapped points without a rintf() library call where there is no rounding instruction (ESP32) and scans for finder patterns run by run; the decoder (about 400 KB at 640x640) is kept between frames instead of being allocated and freed for every frame, and the camera frame is read in place instead of copied. New qrdecode.release() frees the decoder; the Camera activity calls it when QR scanning stops or the activity is paused
@@ -14,6 +15,9 @@ Frameworks:
 - qrdecode: quirc's alignment pattern search never looks at more points than the frame has pixels. A bad finder pattern grouping could make it run for millions of steps (dlbeer/quirc#162)
 - MposKeyboard: set_textarea() hooks a textarea's click once, so an activity that moves the keyboard between several fields no longer stacks a show-keyboard handler (and animation) per switch
 - secp256k1: Schnorr signature checks work in builds whose frozen modules are compiled with mpy-cross -O3 (macOS desktop, web). PublicKey computed its x-only key inside an assert, which -O3 removes, so with the frozen copy every good signature failed to verify and Nostr dropped every relay event
+- io_expander: TCA9555Pin reads input levels back, latches an initial output level before the pin turns into an output, and has machine.Pin-style init() and IN/OUT
+- st7701s: init(type) selects an alternative panel init sequence (_st7701s_init_type<type>, type 17 added); PinSpi3Wire runs the 3-wire init over any pin-like objects, such as an IO expander pin for CS
+- USBManager: bootsel_pin moves the BOOT-button check of the CDC escape hatch off GPIO0, or turns it off, for boards that use GPIO0 for something else
 
 Builtin Apps:
 - Nostr Chat: private group chats (NIP-17 chat rooms). "New chat" gets a "Group" mode: up to 9 other members (NIP-17 rooms hold at most 10 people, you included; npubs, hex keys or names from the profile cache, comma or newline separated; your own key is dropped and duplicates merged) plus an optional subject. The subject is sent with every message, the newest incoming subject renames the chat, and group rows and headers show the subject or, failing that, the members' names. Rooms of 4 or more members are stored under a hashed file name (the room id alone is longer than a file name may be). Not yet done: wraps still go to your own relays rather than each member's NIP-17 inbox relays (kind 10050), and relays that require NIP-42 AUTH are not supported
