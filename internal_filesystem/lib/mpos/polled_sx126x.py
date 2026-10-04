@@ -22,6 +22,8 @@ from micropython import const
 _TX_DONE = const(1 << 0)
 _RX_DONE = const(1 << 1)
 _CRC_ERR = const(1 << 6)
+_TIMEOUT = const(1 << 9)
+_CMD_CFG_DIO_IRQ = const(0x08)
 
 _STATUS = {
     0: "ERR_NONE",
@@ -61,6 +63,11 @@ class PolledSX126x:
 
         radio.configure = _wrapped_configure
         radio.set_irq_callback(self._irq_handler)
+        if getattr(radio, "_dio1", None) is None:
+            # The SX126x latches only the IRQ flags enabled in its IrqMask, and the driver
+            # programs the mask only when it is given a DIO1 pin: a radio polled without one
+            # would never see RX_DONE. Same mask as the driver's, nothing routed to DIO1.
+            radio._cmd(">BHHHH", _CMD_CFG_DIO_IRQ, _TX_DONE | _RX_DONE | _CRC_ERR | _TIMEOUT, 0, 0, 0)
 
     @property
     def radio(self):
