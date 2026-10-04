@@ -498,6 +498,80 @@ class TestLoRaDetection(BoardBoot):
         self.assertEqual(FakeSensorManager.init_args, (None,))
 
 
+class TestLoRaRadio(BoardBoot):
+    def test_d1l_radio_is_handed_to_lora_manager(self):
+        self.tcxo_level = 1
+        board = self.boot()
+        chip = FakeLoRaManager.radioChip
+        self.assertTrue(isinstance(chip, FakePolled))
+        kwargs = chip.radio.kwargs
+        self.assertIs(kwargs["cs"], board.lora_nss)
+        self.assertIs(kwargs["busy"], board.lora_busy)
+        self.assertIs(kwargs["reset"], board.lora_reset)
+        dio1 = kwargs["dio1"]
+        self.assertEqual(dio1.pin, 3)                  # expander pin 3, with a working irq()
+        self.assertTrue(callable(getattr(dio1, "irq", None)))
+        self.assertTrue(kwargs["dio2_rf_sw"])
+        self.assertEqual(kwargs["dio3_tcxo_millivolts"], 2400)
+        self.assertEqual(board.lora_spi_bus.kwargs, {"host": 1, "mosi": 48, "miso": 47, "sck": 41})
+        self.assertEqual(board.lora_spi_device.kwargs["cs"], -1)
+        self.assertTrue(FakeLoRaManager._dio2_rf_sw)
+        self.assertEqual(FakeLoRaManager._tcxo_mv, 2400)
+
+    def test_dio1_interrupts_arrive_through_the_expander(self):
+        board = self.boot()
+        int_pin = FakePin.gpios[42]
+        self.assertEqual((int_pin.mode, int_pin.pull), (FakePin.IN, FakePin.PULL_UP))
+        self.assertTrue(int_pin.irq_handler is not None)
+        dio1 = FakeLoRaManager.radioChip.radio.kwargs["dio1"]
+        fired = []
+        dio1.irq(fired.append, 1)                      # what the SX126x driver does
+        expander = self.expander()
+        expander.set_input(3, 1)                      # the radio raises DIO1
+        board.expander_irq.poll()
+        self.assertEqual(fired, [dio1])
+
+    def test_a_lost_expander_edge_is_caught_by_the_safety_net(self):
+        self.boot()
+        self.assertEqual(len(FakeTaskManager.supervised), 1)
+
+    def test_crystal_board_gets_no_tcxo(self):
+        self.boot()
+        self.assertIsNone(FakeLoRaManager.radioChip.radio.kwargs["dio3_tcxo_millivolts"])
+
+    def test_board_reset_hook_pulses_the_radio_reset_line(self):
+        self.boot()
+        expander = self.expander()
+        levels = []
+        real_write = expander.write
+
+        def spy(data):
+            real_write(data)
+            if data[0] == 0x02:
+                levels.append(expander.driven(X_LORA_RST))
+
+        expander.write = spy
+        FakeLoRaManager.board_reset()
+        self.assertEqual(levels, [0, 1])
+
+    def test_panel_stays_deselected_after_radio_setup(self):
+        self.boot()
+        self.assertEqual(self.expander().driven(X_LCD_CS), 1)
+
+    def test_d1_has_no_radio(self):
+        self.probe_result = False
+        board = self.boot()
+        self.assertIsNone(FakeLoRaManager.radioChip)
+        self.assertIsNone(board.lora_spi_bus)
+
+    def test_radio_init_failure_does_not_stop_the_boot(self):
+        self.radio_error = RuntimeError("BUSY timeout")
+        self.boot()
+        self.assertIsNone(FakeLoRaManager.radioChip)
+        self.assertEqual(FakeSensorManager.init_args, (None,))
+        self.assertEqual(self.expander().driven(X_LCD_CS), 1)
+
+
 class TestRP2040(BoardBoot):
     def test_link_runs_on_uart2_at_2_mbaud(self):
         self.boot()
