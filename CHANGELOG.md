@@ -4,6 +4,7 @@ Future release (next version)
 Board Support:
 - Fri3d 2026 badge: B/Y buttons now also reach apps as ord("B")/ord("Y") KEY events (dual delivery), in addition to their NEXT/PREV focus-navigation role. Previously LVGL consumed NEXT/PREV for tabbing so apps never saw B/Y (e.g. Quasi Bird's FPS toggle and high-score reset did nothing). Tab navigation is unchanged; matches the fri3d 2024 badge and desktop SDL.
 - Add Seeed SenseCAP Indicator D1/D1S/D1L/D1Pro: 4" 480x480 ST7701S RGB panel (3-wire init behind a PCA9535 IO expander), FT6336U touch, user button as back, PWM backlight, and a `sensecap_indicator` build target (8 MB flash without OTA, REPL on the CH340 UART)
+- SenseCAP Indicator: SD card at /sdcard, Grove I2C bus (also the D1S/D1Pro sensors) and buzzer through the RP2040 co-processor running indicator_rp2040 firmware; on firmware without the tone message the buzzer keeps a tune's rhythm at one pitch
 
 Frameworks:
 - qrdecode: faster QR scanning with bit-identical results. quirc rounds perspective-mapped points without a rintf() library call where there is no rounding instruction (ESP32) and scans for finder patterns run by run; the decoder (about 400 KB at 640x640) is kept between frames instead of being allocated and freed for every frame, and the camera frame is read in place instead of copied. New qrdecode.release() frees the decoder; the Camera activity calls it when QR scanning stops or the activity is paused
@@ -18,6 +19,9 @@ Frameworks:
 - io_expander: TCA9555Pin reads input levels back, latches an initial output level before the pin turns into an output, and has machine.Pin-style init() and IN/OUT
 - st7701s: init(type) selects an alternative panel init sequence (_st7701s_init_type<type>, type 17 added); PinSpi3Wire runs the 3-wire init over any pin-like objects, such as an IO expander pin for CS
 - USBManager: bootsel_pin moves the BOOT-button check of the CDC escape hatch off GPIO0, or turns it off, for boards that use GPIO0 for something else
+- AudioManager: a buzzer output can take `buzzer_factory` (a callable returning a PWM-like object) instead of `buzzer_pin`, for buzzers driven through another chip
+- SDCardManager: `init(vfs=...)` mounts a ready-made VFS at /sdcard, for SD cards driven by another chip
+- render_guard: add_busy_check() skips an LVGL pass while the current thread holds a driver lock the pass may need, such as a co-processor link it is in the middle of a request on
 
 Builtin Apps:
 - Nostr Chat: private group chats (NIP-17 chat rooms). "New chat" gets a "Group" mode: up to 9 other members (NIP-17 rooms hold at most 10 people, you included; npubs, hex keys or names from the profile cache, comma or newline separated; your own key is dropped and duplicates merged) plus an optional subject. The subject is sent with every message, the newest incoming subject renames the chat, and group rows and headers show the subject or, failing that, the members' names. Rooms of 4 or more members are stored under a hashed file name (the room id alone is longer than a file name may be). Not yet done: wraps still go to your own relays rather than each member's NIP-17 inbox relays (kind 10050), and relays that require NIP-42 AUTH are not supported
