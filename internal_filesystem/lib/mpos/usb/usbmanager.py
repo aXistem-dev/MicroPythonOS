@@ -41,6 +41,9 @@ class USBManager:
     # boots into host mode.
     _HOST_PREFS = "com.micropythonos.settings"
     _HOST_MODE_KEY = "usb_host_mode"
+    # GPIO of the BOOT button used as the "stay in CDC device mode" escape hatch. Boards where
+    # GPIO0 is wired to something else (e.g. an RGB panel data line) set this to None.
+    bootsel_pin = 0
 
     @classmethod
     def is_available(cls):
@@ -73,10 +76,12 @@ class USBManager:
         # regardless of the persisted flag (no-UART boards would otherwise
         # strand headless in host mode). Best effort: GPIO0 with pull-up
         # on most S3 boards; silent no-op anywhere else.
+        if cls.bootsel_pin is None:
+            return False
         try:
             from machine import Pin
             import time as _time
-            boot = Pin(0, Pin.IN, Pin.PULL_UP)
+            boot = Pin(cls.bootsel_pin, Pin.IN, Pin.PULL_UP)
             _time.sleep_ms(5)
             return boot.value() == 0
         except Exception:
