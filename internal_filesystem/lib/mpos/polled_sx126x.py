@@ -87,6 +87,14 @@ class PolledSX126x:
             except Exception:
                 pass
 
+    def enable_irq(self):
+        # Re-attach the DIO1 ISR that disable_irq() removed, as the driver's constructor
+        # attached it, once a hardware reset has brought the chip back.
+        dio1 = getattr(self._radio, "_dio1", None)
+        if dio1:
+            from machine import Pin
+            dio1.irq(self._radio._radio_isr, Pin.IRQ_RISING)
+
     def _irq_handler(self):
         # SPI bus race workaround: the DIO1 ISR fires in the main
         # MicroPython thread.  We MUST NOT call poll_send() here

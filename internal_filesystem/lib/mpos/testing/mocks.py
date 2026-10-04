@@ -95,6 +95,8 @@ class MockPin:
     OUT = 1
     PULL_UP = 2
     PULL_DOWN = 3
+    IRQ_RISING = 1  # ESP32 values
+    IRQ_FALLING = 2
     
     def __init__(self, pin_number, mode=None, pull=None):
         self.pin_number = pin_number
