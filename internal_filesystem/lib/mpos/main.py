@@ -216,6 +216,16 @@ def detect_board():
             return None
 
         if is_esp32s3:
+            if __debug__: logger.debug("sensecap_indicator ?")
+            if i2c0 := fail_save_i2c(sda=39, scl=40):
+                # PCA9535 expander + FT6336U touch, with a negative control against floating buses.
+                # Probed first: most later probes use pins that are RGB data or SPI lines on this board,
+                # where an undriven line can fake an ACK.
+                from mpos.board import sensecap_indicator_probe
+                if sensecap_indicator_probe.present(i2c0):
+                    return "sensecap_indicator"
+                restore_i2c(sda=39, scl=40)
+
             if __debug__: logger.debug("lilygo_t_hmi ?")
             if detect_lilygo_t_hmi():
                 return "lilygo_t_hmi"
