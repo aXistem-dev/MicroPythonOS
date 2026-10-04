@@ -251,18 +251,12 @@ class LoRaChatV2(Activity):
         #LoRaManager.stop_watchdog()
         self.lora_device.suspend()
 
-        # Custom LoRa Chat settings to avoid overlap with Meshtastic and MeshCore:
+        # Custom LoRa Chat settings:
         # syncWord 0x12 is for peer-to-peer
         # sf=10 for longer range but also longer transmission time
         # cr=8 is 4/8: maximal error correction, but slower
         self.lora_device.radio.configure({ "freq_khz": 869450, "bw": 62.5, "sf": 10, "coding_rate": 8, "syncword": 0x12, "preamble_len": 8, "output_power": 22 })
         self.lora_device.radio.calibrate_image()
-        # Meshtastic settings for Europe (868Mhz) at default LongFast profile (untested)
-        # https://meshtastic.org/docs/configuration/radio/lora/
-        # self.lora_device.radio.configure({"freq_khz": 869525, "bw": 250, "sf": 12, "coding_rate": 8, "syncword": 0x2B, "preamble_len": 16, "output_power": 22})
-
-        # MeshCore settings:
-        # self.lora_device.radio.configure({"freq_khz": 869618, "bw": 62.5, "sf": 8, "coding_rate": 8, "syncword": 0x12, "preamble_len": 8, "output_power": 22})
         self.lora_device.set_callback(self.receive_callback)
 
         self.lora_device.resume()
