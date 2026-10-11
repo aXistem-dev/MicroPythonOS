@@ -14,6 +14,8 @@ class LoRaChatV2(Activity):
 
     alltext = ""
     lora_device = None
+    _auto_send_timer = None
+    _auto_watchdog_timer = None
 
     # Widgets:
     messages = None
@@ -136,6 +138,13 @@ class LoRaChatV2(Activity):
         self.spinner.add_flag(lv.obj.FLAG.HIDDEN)
         print("LoRa Chat foregrounded, starting receive_thread")
         if not simulation_mode:
+            if LoRaManager.radioChip is None:
+                self.messages.set_text("No LoRa radio on this device.")
+                return
+            from mpos.polled_sx126x import PolledSX126x
+            if not isinstance(LoRaManager.radioChip, PolledSX126x):
+                self.messages.set_text("This app does not support this device's LoRa driver yet.")
+                return
             if not LoRaManager.acquire(self.appFullName):
                 print("LoRa in use by", LoRaManager.holder)
                 return
@@ -149,8 +158,10 @@ class LoRaChatV2(Activity):
         super().onPause(screen)
         if self._auto_send_timer:
             self._auto_send_timer.delete()
+            self._auto_send_timer = None
         if self._auto_watchdog_timer:
             self._auto_watchdog_timer.delete()
+            self._auto_watchdog_timer = None
         print("LoRa Chat backgrounded, releasing LoRa lock")
         if not simulation_mode:
             LoRaManager.release(self.appFullName)
