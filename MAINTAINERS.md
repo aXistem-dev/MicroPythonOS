@@ -16,6 +16,7 @@ This table tracks board definitions from `internal_filesystem/lib/mpos/board/`.
 | `matouch_esp32_s3_spi_ips_2_8_with_camera_ov3660.py` | Makerfabs MaTouch ESP32-S3 SPI IPS 2.8 (OV3660) | Thomas Farstrike         | @ThomasFarstrike | @ThomasF7e    |
 | `odroid_go.py`                                       | Hardkernel ODROID-GO                            | Jens Diemer              | @jedie, @Pylucid | Unknown       |
 | `qemu.py`                                            | QEMU target profile                             | Thomas Farstrike         | @ThomasFarstrike | @ThomasF7e    |
+| `sensecap_indicator.py`                              | Seeed SenseCAP Indicator (D1, D1S, D1L, D1Pro)  | Confituurke              | @Confituurke     | Unknown       |
 | `unphone.py`                                         | unPhone                                         | Jens Diemer              | @jedie           | Unknown       |
 | `squixl.py`                                          | SQUiXL                                          | Jens Diemer              | @jedie           | Unknown       |
 | `unihiker_k10.py`                                    | DFRobot UniHiker K10                            | Brandon Woodward         | @woodhead-tech   | Unknown       |

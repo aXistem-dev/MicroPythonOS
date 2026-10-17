@@ -1,12 +1,21 @@
 Future release (next version)
 =====
 
+Board Support:
+- Add Seeed SenseCAP Indicator D1/D1S/D1L/D1Pro (4" 480x480 ST7701S RGB panel with its 3-wire init behind a PCA9535 IO expander, FT6336U touch, user button, PWM backlight, LoRa radio detection on the D1L/D1Pro) with a `sensecap_indicator` build target (8 MB flash, no OTA, UART REPL on the CH340); adds TCA9555Pin readback, a selectable ST7701S init sequence, PinSpi3Wire, and a configurable USBManager.bootsel_pin
+- SenseCAP Indicator: SD card at /sdcard, Grove I2C bus (also the D1S/D1Pro sensors) and buzzer through the RP2040 co-processor, which needs the indicator_rp2040 firmware
+- SenseCAP Indicator: the D1L/D1Pro SX1262 LoRa radio through LoRaManager, with DIO1 delivered through the IO expander interrupt
+
 Frameworks:
 - qrdecode: faster QR scanning with bit-identical results. quirc rounds perspective-mapped points without a rintf() library call where there is no rounding instruction (ESP32) and scans for finder patterns run by run; the decoder (about 400 KB at 640x640) is kept between frames instead of being allocated and freed for every frame, and the camera frame is read in place instead of copied. New qrdecode.release() frees the decoder; the Camera activity calls it when QR scanning stops or the activity is paused
 - qrdecode: exceptions from qrdecode_rgb565() are now caught by the caller's except clause; they used to skip it (and could leave the caller's frame in a broken state) because the error path popped the caller's exception handler as well as its own
 - qrdecode: the decoder kept while QR scanning is on comes entirely from PSRAM. quirc's flood-fill stack (about 7 KB at 640x640) used to come from internal RAM, which the display and camera DMA buffers also need. quirc's ps_malloc() passed its capability flags where heap_caps_malloc_prefer() expects their count, and it now prefers PSRAM on every ESP32 target, not only on Xtensa
 - qrdecode: a frame size whose pixel count overflows a 32-bit int raises ValueError. On the ESP32 such a size used to pass the buffer size check, and quirc then scanned rows beyond its buffer
 - Camera: stopping the camera twice, for example when the activity is paused again, no longer deletes the capture timer twice
+- AudioManager: a buzzer output can take `buzzer_factory` (a callable returning a PWM-like object) instead of `buzzer_pin`, for buzzers driven through another chip
+- SDCardManager: `init(vfs=...)` mounts a ready-made VFS at /sdcard, for SD cards driven by another chip
+- LoRaManager: the SX126x stack from the lora-upstream branch (polled radios, acquire/release, watchdog), a `board_reset` hook, DIO2 RF-switch re-arm and DIO1 interrupt re-attach after a reset, an IRQ mask programmed for polled radios too, PolledSX126x.send() returning right after TX_DONE, and LoRa Chat v2 saying so on a board without a radio
+- io_expander: ExpanderIRQ shares a TCA9555/PCA9535 /INT line between per-pin interrupts, with a machine.Pin-like pin(n) for drivers
 
 0.20.0
 ======

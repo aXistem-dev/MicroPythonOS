@@ -81,6 +81,10 @@ class TCA9555:
             p = machine.Pin(pin, machine.Pin.IN)
             return p.value()
 
+    def read_inputs(self):
+        """Read both input ports without rewriting CONFIG (safe for output pins too)."""
+        return self._read_word(self.REG_INPUT)
+
 
 class TCA9555Pin:
     """
@@ -89,15 +93,29 @@ class TCA9555Pin:
     is expected, for example a reset line.
     """
 
-    def __init__(self, tca: TCA9555, pin: int, mode=machine.Pin.OUT):
+    def __init__(self, tca: TCA9555, pin: int, mode=machine.Pin.OUT, value=None):
         self.tca = tca
         self.pin = pin
-        self.tca.pin_mode(pin, mode)
+        self.init(mode, value=value)
+
+    def init(self, mode=machine.Pin.OUT, value=None):
+        pin = self.pin
+        tca = self.tca
+        if mode == machine.Pin.OUT and value is not None and pin & 0x40:
+            # Latch the level before switching to output so the line never glitches
+            mask = 1 << (pin & 0xBF)
+            if value:
+                tca.output_states |= mask
+            else:
+                tca.output_states &= ~mask
+            tca._write_word(tca.REG_OUTPUT, tca.output_states)
+        tca.pin_mode(pin, mode)
 
     def value(self, v=None):
         if v is None:
-            # No readback support for output-only pins
-            return None
+            if self.pin & 0x40:
+                return 1 if self.tca.read_inputs() & (1 << (self.pin & 0xBF)) else 0
+            return machine.Pin(self.pin).value()
         self.tca.digital_write(self.pin, v)
 
     def __call__(self, v=None):
