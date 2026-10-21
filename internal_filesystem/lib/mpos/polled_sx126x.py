@@ -121,8 +121,9 @@ class PolledSX126x:
             return  # send() and recv() read the flags themselves
         if self._mid_command():
             # This handler is scheduled work: it runs between two bytecodes of whatever this
-            # thread executes, which may be another radio command with CS held low. Reading
-            # the flags now would mix the two commands on the bus; try again once it is done.
+            # thread executes, which may be another radio command with CS held low, and another
+            # thread may be in the middle of one. Reading the flags now would mix the two
+            # commands on the bus or wait for the other thread; try again once it is done.
             try:
                 micropython.schedule(self._deferred_irq, None)
             except RuntimeError:
@@ -146,13 +147,7 @@ class PolledSX126x:
 
     def _mid_command(self):
         spi = getattr(self._radio, "_spi", None)
-        if not getattr(spi, "_lock_count", 0):
-            return False
-        try:
-            import _thread
-            return spi._lock_owner == _thread.get_ident()
-        except (ImportError, AttributeError):
-            return True
+        return bool(getattr(spi, "_lock_count", 0))
 
     def configure(self, cfg):
         self._radio.configure(cfg)

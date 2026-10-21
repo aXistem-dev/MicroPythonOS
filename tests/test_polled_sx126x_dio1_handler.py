@@ -1,5 +1,6 @@
 """PolledSX126x's DIO1 handler is scheduled work: it can run in the middle of another radio
-command on the same thread, or during send()/recv(). It must not touch the radio then."""
+command, on its own thread or another one, or during send()/recv(). It must not touch the radio
+then."""
 
 import unittest
 
@@ -77,10 +78,16 @@ class TestDio1Handler(unittest.TestCase):
         self.assertEqual(self.radio.irq_reads, 0)
         self.assertEqual(self.mp.scheduled, [])
 
-    def test_a_command_on_another_thread_does_not_defer(self):
+    def test_a_command_on_another_thread_defers(self):
         self.radio._spi._lock_count = 1
         self.radio._spi._lock_owner = -1
         self.radio.isr()
+        self.assertEqual(self.radio.irq_reads, 0)
+        self.assertEqual(len(self.mp.scheduled), 1)
+        self.radio._spi._lock_count = 0
+        self.radio._spi._lock_owner = None
+        fn, arg = self.mp.scheduled.pop()
+        fn(arg)
         self.assertEqual(self.events, [2])
 
 

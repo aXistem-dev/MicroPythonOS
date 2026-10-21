@@ -4,7 +4,8 @@ print("lora_spi_adapter: loaded (filesystem copy)")
 # standard machine.SPI: write_readinto/write/readinto) can talk through
 # lvgl_micropython's split SPI.Bus/SPI.Device API.
 #
-# SPIAdapter uses a reentrant Python-level lock (count + owner tid).
+# SPIAdapter uses a reentrant Python-level lock (count + owner tid) that
+# keeps other threads out until the holder's last unlock().
 # Each individual byte transfer via the C-level transfer() function
 # handles bus arbitration atomically (spi_device_acquire_bus/release
 # per transaction).  We never call C-level device.lock()/unlock()
@@ -29,8 +30,10 @@ class SPIAdapter:
         try:
             import _thread
             self._get_tid = _thread.get_ident
+            self._mutex = _thread.allocate_lock()
         except (ImportError, AttributeError):
             self._get_tid = lambda: 0
+            self._mutex = None
 
     def write(self, buf):
         # ponytail: byte-at-a-time _dev.read(1, byte) instead of
@@ -70,15 +73,21 @@ class SPIAdapter:
 
     def lock(self):
         tid = self._get_tid()
-        if self._lock_count == 0 or self._lock_owner != tid:
-            self._lock_owner = tid
-        self._lock_count += 1
-        return self._lock_count
+        if self._lock_count and self._lock_owner == tid:
+            self._lock_count += 1
+            return self._lock_count
+        if self._mutex:
+            self._mutex.acquire()
+        self._lock_owner = tid
+        self._lock_count = 1
+        return 1
 
     def unlock(self):
         self._lock_count -= 1
         if self._lock_count == 0:
             self._lock_owner = None
+            if self._mutex:
+                self._mutex.release()
         return self._lock_count
 
 
