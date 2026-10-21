@@ -9,6 +9,8 @@
 import logging
 import time
 
+import micropython
+
 logger = logging.getLogger(__name__)
 
 from lora import SX1262 as _UpstreamSX1262  # noqa: F401 — re-exported for type info
@@ -115,6 +117,17 @@ class PolledSX126x:
             if __debug__:
                 logger.warning("DIO1 IRQ fired while suspended (SPI bus race workaround)")
             return
+        if self._in_op:
+            return  # send() and recv() read the flags themselves
+        if self._mid_command():
+            # This handler is scheduled work: it runs between two bytecodes of whatever this
+            # thread executes, which may be another radio command with CS held low. Reading
+            # the flags now would mix the two commands on the bus; try again once it is done.
+            try:
+                micropython.schedule(self._deferred_irq, None)
+            except RuntimeError:
+                pass  # queue full: the flags stay latched for the next edge or poll
+            return
         # ponytail: if the chip is stuck BUSY (e.g. shared SPI bus
         # contention), _get_irq() times out.  Catch it so the ISR
         # doesn't crash — the data path already polls _get_irq() in
@@ -127,6 +140,19 @@ class PolledSX126x:
         except Exception:
             if __debug__:
                 logger.warning("DIO1 ISR: SPI read failed (chip busy)")
+
+    def _deferred_irq(self, _):
+        self._irq_handler()
+
+    def _mid_command(self):
+        spi = getattr(self._radio, "_spi", None)
+        if not getattr(spi, "_lock_count", 0):
+            return False
+        try:
+            import _thread
+            return spi._lock_owner == _thread.get_ident()
+        except (ImportError, AttributeError):
+            return True
 
     def configure(self, cfg):
         self._radio.configure(cfg)
