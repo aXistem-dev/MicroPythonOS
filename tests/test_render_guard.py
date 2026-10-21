@@ -53,6 +53,21 @@ class TestRenderGuard(unittest.TestCase):
         self.assertTrue(render_guard.has_render_headroom())
         self.assertFalse(deeper(40))
 
+    def test_a_busy_check_skips_the_pass_while_it_reports_busy(self):
+        render_guard.STACK_SIZE = None
+        busy = [True]
+        check = lambda: busy[0]
+        render_guard.add_busy_check(check)
+        render_guard.add_busy_check(check)
+        try:
+            self.assertIs(render_guard.on_task_handler(1, None), False)
+            busy[0] = False
+            self.assertTrue(render_guard.on_task_handler(1, None))
+        finally:
+            render_guard.remove_busy_check(check)
+        busy[0] = True
+        self.assertTrue(render_guard.on_task_handler(1, None))
+
     def test_esp32_reserve_leaves_room_for_a_measured_pass(self):
         self.assertTrue(render_guard.RENDER_RESERVE >= 7344 + 1024)
         if render_guard.STACK_SIZE is not None:

@@ -89,6 +89,17 @@ to asyncio.
 It only guards passes run by TaskHandler. Code that calls lv.task_handler(),
 lv.timer_handler() or lv.refr_now() itself is not covered.
 
+Busy checks
+-----------
+The same skip serves drivers whose lock a pass may need. A pass that runs on
+top of a thread holding such a lock (an LVGL image decoder reading from a card
+behind a co-processor link the thread is in the middle of using) cannot take
+the lock, and waiting for it would wait for that very thread. Such a driver
+registers a busy check with add_busy_check(): a callable that returns True
+while the current thread holds the lock. The pass is then skipped and runs on
+a later tick, once the lock is free. Busy checks run on every pass, so they
+must be cheap.
+
 How to remove it
 ----------------
 The root fix is to never start a pass deep in the stack: run passes from a
@@ -97,7 +108,9 @@ asyncio task, as the web build's TaskHandler already does
 (scripts/web_port/staged_lib/task_handler.py). That changes when every app's
 UI updates: no pass would run while code blocks without yielding to asyncio.
 If that lands, delete this module, its install() call in
-change_task_handler() (mpos/main.py) and tests/test_render_guard.py.
+change_task_handler() (mpos/main.py) and tests/test_render_guard.py; busy
+checks are then no longer needed either, since a pass no longer runs on top
+of other code.
 
 A larger mp_task stack is not a root fix on its own: it costs internal RAM
 (FreeRTOS allocates task stacks there) and only moves the limit. If the stack
@@ -122,6 +135,8 @@ STACK_SIZE = 16 * 1024 if sys.platform == "esp32" else None
 # passes heavier than the ones measured.
 RENDER_RESERVE = 9 * 1024
 
+_busy_checks = []
+
 
 def has_render_headroom():
     """True if a pass can start at the current stack depth."""
@@ -130,9 +145,23 @@ def has_render_headroom():
     return STACK_SIZE - micropython.stack_use() >= RENDER_RESERVE
 
 
+def add_busy_check(check):
+    """Skip passes while check() returns True (see "Busy checks" above)."""
+    if check not in _busy_checks:
+        _busy_checks.append(check)
+
+
+def remove_busy_check(check):
+    if check in _busy_checks:
+        _busy_checks.remove(check)
+
+
 def on_task_handler(event, user_data):
     """TASK_HANDLER_STARTED callback: returning False makes TaskHandler skip
     this pass. The next timer tick tries again."""
+    for check in _busy_checks:
+        if check():
+            return False
     return has_render_headroom()
 
 
