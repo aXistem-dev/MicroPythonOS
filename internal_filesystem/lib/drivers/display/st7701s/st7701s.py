@@ -1,3 +1,5 @@
+import sys
+
 import lvgl as lv
 import rgb_display_framework
 
@@ -57,5 +59,17 @@ class ST7701S(rgb_display_framework.RGBDisplayDriver):
     def _spi_3wire_init(self, type=None):
         # The framework already ran spi_3wire.init(). Send the panel sequence
         # via self.set_params, which routes to spi_3wire.tx_param.
-        mod = __import__('_st7701s_init')
-        mod.init(self)
+        # init(type) picks an alternative panel sequence, _st7701s_init_type<type> in this
+        # package (lvgl_micropython's naming). It is imported only for that one call.
+        if type is None:
+            mod = __import__('_st7701s_init')
+            mod.init(self)
+            return
+        name = '_st7701s_init_type%d' % type
+        package = sys.modules['drivers.display.st7701s']
+        __import__('drivers.display.st7701s.' + name)
+        try:
+            getattr(package, name).init(self)
+        finally:
+            del sys.modules['drivers.display.st7701s.' + name]
+            delattr(package, name)
